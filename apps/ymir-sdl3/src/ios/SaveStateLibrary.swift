@@ -301,7 +301,7 @@ struct SaveStateManagerView: View {
                     }
                 } footer: {
                     if entry.game == nil {
-                        Text("This game isn't in your library, or its save states were made before Ymir noted which game they belong to. Start the game once from the library to link them, then they can be loaded from here.")
+                        WrappedText("This game isn't in your library, or its save states were made before Ymir noted which game they belong to. Start the game once from the library to link them, then they can be loaded from here.")
                     }
                 }
             }
@@ -309,7 +309,7 @@ struct SaveStateManagerView: View {
             if !saved.isEmpty {
                 GlassSection {
                 } footer: {
-                    Text("Load starts the game and continues from the state. Save states are stored per game in the savestates folder, which is visible in the Files app. Export shares a copy, for example to Files or AirDrop.")
+                    WrappedText("Load starts the game and continues from the state. Save states are stored per game in the savestates folder, which is visible in the Files app. Export shares a copy, for example to Files or AirDrop.")
                 }
             }
         }

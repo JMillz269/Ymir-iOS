@@ -226,11 +226,8 @@ private struct SettingsGroup<Content: View>: View {
             .frame(width: width)
             .ymirGlassCard()
             if let footer {
-                Text(footer)
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
+                WrappedText(footer)
                     .frame(width: max(0, width - 32), alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
                     .padding(.leading, 16)
             }
         }
@@ -491,7 +488,7 @@ struct DisplaySettingsView: View {
             } header: {
                 Text("Upscaling")
             } footer: {
-                Text("MetalFX upscales the game's image with the GPU. Spatial works on each frame on its own and looks cleaner and sharper than plain scaling. Temporal also blends in previous frames for extra stability, but the Saturn's 2D video has no motion data, so fast movement can show slight ghosting.")
+                WrappedText("MetalFX upscales the game's image with the GPU. Spatial works on each frame on its own and looks cleaner and sharper than plain scaling. Temporal also blends in previous frames for extra stability, but the Saturn's 2D video has no motion data, so fast movement can show slight ghosting.")
             }
 
             GlassSection {
@@ -502,7 +499,7 @@ struct DisplaySettingsView: View {
             } header: {
                 Text("Picture Filters")
             } footer: {
-                Text("Sharp Pixels keeps every game pixel crisp and only smooths its edges, which looks better than plain smooth scaling. Sharpening adds crispness after upscaling. Scanlines and the aperture grille imitate a CRT TV; they look best on a high resolution screen like yours.")
+                WrappedText("Sharp Pixels keeps every game pixel crisp and only smooths its edges, which looks better than plain smooth scaling. Sharpening adds crispness after upscaling. Scanlines and the aperture grille imitate a CRT TV; they look best on a high resolution screen like yours.")
             }
 
             GlassSection {
@@ -514,7 +511,7 @@ struct DisplaySettingsView: View {
             } header: {
                 Text("Graphics Chip")
             } footer: {
-                Text("The Metal renderer draws the Saturn's second video chip (backgrounds, the sprite layer and the final mix) with the GPU, which takes a lot of work off the processor and reduces heat. The second switch moves the first video chip (polygons, sprites and lines) to the GPU as well; it needs the Metal renderer. Direct Display hands the picture straight to the screen on the GPU instead of copying it through the processor, which is faster and saves a frame of delay; turn it off if the picture misbehaves. Internal Resolution, Transparent Meshes and Deinterlacing need the first two switches on.")
+                WrappedText("The Metal renderer draws the Saturn's second video chip (backgrounds, the sprite layer and the final mix) with the GPU, which takes a lot of work off the processor and reduces heat. The second switch moves the first video chip (polygons, sprites and lines) to the GPU as well; it needs the Metal renderer. Direct Display hands the picture straight to the screen on the GPU instead of copying it through the processor, which is faster and saves a frame of delay; turn it off if the picture misbehaves. Internal Resolution, Transparent Meshes and Deinterlacing need the first two switches on.")
             }
 
             GlassSection {
@@ -528,7 +525,7 @@ struct DisplaySettingsView: View {
             } header: {
                 Text("Resolution")
             } footer: {
-                Text("Draws the game's 3D models, sprites and lines at several times the Saturn's own resolution, so their edges are smooth and detailed instead of blocky. Backgrounds drawn by the Saturn's second video chip stay at their original sharpness. Higher values need much more processing power. Modes that can't be enlarged (high resolution screens, interlaced video, 8-bit or rotated sprite buffers) are drawn at native resolution. Skip Native Drawing saves processing power by no longer drawing everything a second time at the original size; the original-size picture the game can read back is then copied from the enlarged one at the end of each frame, so games that read the picture while it is still being drawn may misbehave.")
+                WrappedText("Draws the game's 3D models, sprites and lines at several times the Saturn's own resolution, so their edges are smooth and detailed instead of blocky. Backgrounds drawn by the Saturn's second video chip stay at their original sharpness. Higher values need much more processing power. Modes that can't be enlarged (high resolution screens, interlaced video, 8-bit or rotated sprite buffers) are drawn at native resolution. Skip Native Drawing saves processing power by no longer drawing everything a second time at the original size; the original-size picture the game can read back is then copied from the enlarged one at the end of each frame, so games that read the picture while it is still being drawn may misbehave.")
             }
 
             GlassSection {
@@ -537,7 +534,7 @@ struct DisplaySettingsView: View {
             } header: {
                 Text("Enhancements")
             } footer: {
-                Text("Deinterlacing smooths high resolution interlaced video. Transparent meshes replaces the checkerboard patterns games use for transparency with real transparency.")
+                WrappedText("Deinterlacing smooths high resolution interlaced video. Transparent meshes replaces the checkerboard patterns games use for transparency with real transparency.")
             }
 
             GlassSection {
@@ -557,7 +554,7 @@ struct DisplaySettingsView: View {
             } header: {
                 Text("Synchronization")
             } footer: {
-                Text("Video sync paces emulation to the display. Frame Pacing picks how: Exact Speed runs the game at the Saturn's own rate (59.83 frames per second), so about every 6 seconds one frame stays on the screen twice as long. Match Display shows exactly one game frame per display refresh for the smoothest motion; the game and its sound then run 0.3% faster, which you can't hear. Frame Delay lowers input lag: Auto starts emulating each frame as late as the spare time allows (the phone usually finishes a frame in a third of the time it has), so the game reads your controls closer to when the picture is shown, up to 12 ms later. It backs off by itself in heavy scenes; turn it off if you see stutter. Use Full Refresh Rate does nothing with Match Display. Reduce Latency helps on displays with a low refresh rate.")
+                WrappedText("Video sync paces emulation to the display. Frame Pacing picks how: Exact Speed runs the game at the Saturn's own rate (59.83 frames per second), so about every 6 seconds one frame stays on the screen twice as long. Match Display shows exactly one game frame per display refresh for the smoothest motion; the game and its sound then run 0.3% faster, which you can't hear. Frame Delay lowers input lag: Auto starts emulating each frame as late as the spare time allows (the phone usually finishes a frame in a third of the time it has), so the game reads your controls closer to when the picture is shown, up to 12 ms later. It backs off by itself in heavy scenes; turn it off if you see stutter. Use Full Refresh Rate does nothing with Match Display. Reduce Latency helps on displays with a low refresh rate.")
             }
         }
         .navigationTitle("Display")
@@ -591,7 +588,7 @@ struct AudioSettingsView: View {
             } header: {
                 Text("Sound Chip")
             } footer: {
-                Text("Linear interpolation matches the real SCSP. Higher step granularity is more accurate and slower.")
+                WrappedText("Linear interpolation matches the real SCSP. Higher step granularity is more accurate and slower.")
             }
         }
         .navigationTitle("Audio")
@@ -623,7 +620,7 @@ struct ControlsSettingsView: View {
                 SettingSlider(title: "Opacity", value: store.float("touch.opacity", default: 0.9), range: 0.1...1,
                               format: percent)
             } footer: {
-                Text("MFi, Xbox, PlayStation and other Bluetooth controllers work automatically, using the default bindings. On-screen controls hide while a controller is connected. Press Select on a controller to open the menu.")
+                WrappedText("MFi, Xbox, PlayStation and other Bluetooth controllers work automatically, using the default bindings. On-screen controls hide while a controller is connected. Press Select on a controller to open the menu.")
             }
 
             GlassSection {
@@ -637,7 +634,7 @@ struct ControlsSettingsView: View {
             } header: {
                 Text("Connected Peripherals")
             } footer: {
-                Text("Touch controls and the default controller bindings drive the Saturn Control Pad on port 1.")
+                WrappedText("Touch controls and the default controller bindings drive the Saturn Control Pad on port 1.")
             }
 
             GlassSection {
@@ -650,7 +647,7 @@ struct ControlsSettingsView: View {
             } header: {
                 Text("Controller")
             } footer: {
-                Text("The deadzone is the stick travel that is ignored. Analog to digital sensitivity is how far a stick must move to press a digital button.")
+                WrappedText("The deadzone is the stick travel that is ignored. Analog to digital sensitivity is how far a stick must move to press a digital button.")
             }
         }
         .navigationTitle("Controls")
@@ -674,7 +671,7 @@ struct EmulationSettingsView: View {
             } header: {
                 Text("Speed")
             } footer: {
-                Text("Switch between the two speeds to slow the game down or run it faster. Fast forward in the in-game menu ignores them.")
+                WrappedText("Switch between the two speeds to slow the game down or run it faster. Fast forward in the in-game menu ignores them.")
             }
 
             GlassSection {
@@ -685,7 +682,7 @@ struct EmulationSettingsView: View {
             } header: {
                 Text("Behavior")
             } footer: {
-                Text("Pause When Interrupted pauses the game while something covers it (the control center, a notification, a call, the app switcher). Autosave keeps a state of the game in its own slot whenever you leave it: the app goes to the background, you close the game, or you start or load something else. Find it in Save States.")
+                WrappedText("Pause When Interrupted pauses the game while something covers it (the control center, a notification, a call, the app switcher). Autosave keeps a state of the game in its own slot whenever you leave it: the app goes to the background, you close the game, or you start or load something else. Find it in Save States.")
             }
 
             GlassSection {
@@ -695,7 +692,7 @@ struct EmulationSettingsView: View {
             } header: {
                 Text("Rewind")
             } footer: {
-                Text("Lets you step back in time, at the cost of memory and some performance. Higher compression uses less memory but is slower.")
+                WrappedText("Lets you step back in time, at the cost of memory and some performance. Higher compression uses less memory but is slower.")
             }
 
             GlassSection {
@@ -707,7 +704,7 @@ struct EmulationSettingsView: View {
             } header: {
                 Text("Screenshots")
             } footer: {
-                Text("Screenshots are saved in the Ymir folder under screenshots.")
+                WrappedText("Screenshots are saved in the Ymir folder under screenshots.")
             }
         }
         .navigationTitle("Emulation")
@@ -738,7 +735,7 @@ struct SystemSettingsView: View {
             } header: {
                 Text("Region")
             } footer: {
-                Text("With autodetection on, the region and video standard follow the loaded game. Reset the console after changing them.")
+                WrappedText("With autodetection on, the region and video standard follow the loaded game. Reset the console after changing them.")
             }
 
             GlassSection {
@@ -756,7 +753,7 @@ struct SystemSettingsView: View {
             } header: {
                 Text("Clock")
             } footer: {
-                Text("The virtual clock is deterministic and only moves while the emulator runs.")
+                WrappedText("The virtual clock is deterministic and only moves while the emulator runs.")
             }
 
             GlassSection {
@@ -764,7 +761,7 @@ struct SystemSettingsView: View {
             } header: {
                 Text("Saves")
             } footer: {
-                Text("Creates an internal backup memory image for each game. Backup files are in the Ymir folder under backup.")
+                WrappedText("Creates an internal backup memory image for each game. Backup files are in the Ymir folder under backup.")
             }
         }
         .navigationTitle("System & Region")
@@ -782,7 +779,7 @@ struct CartridgeSettingsView: View {
             GlassSection {
                 Toggle("Switch to Recommended Cartridges", isOn: store.bool("cartridge.autoLoad", default: true))
             } footer: {
-                Text("Automatically inserts the cartridge a game needs, such as a RAM expansion.")
+                WrappedText("Automatically inserts the cartridge a game needs, such as a RAM expansion.")
             }
 
             GlassSection {
@@ -818,7 +815,7 @@ struct CartridgeSettingsView: View {
             } header: {
                 Text("Inserted Cartridge")
             } footer: {
-                Text("Chosen files are copied into the Ymir folder, under roms/cart and backup.")
+                WrappedText("Chosen files are copied into the Ymir folder, under roms/cart and backup.")
             }
         }
         .navigationTitle("Cartridge")
@@ -837,7 +834,7 @@ struct CDBlockSettingsView: View {
                 SettingSlider(title: "Read Speed", value: store.intSlider("cdblock.readSpeed", default: 2),
                               range: 2...200, step: 1, format: { String(format: "%.0f×", $0) })
             } footer: {
-                Text("The maximum read speed of the emulated drive. 2× is how fast a real Saturn reads discs.")
+                WrappedText("The maximum read speed of the emulated drive. 2× is how fast a real Saturn reads discs.")
             }
 
             GlassSection {
@@ -847,7 +844,7 @@ struct CDBlockSettingsView: View {
             } header: {
                 Text("Accuracy")
             } footer: {
-                Text("Emulates the CD block's own CPU. Needs a CD block ROM image, and is much slower.")
+                WrappedText("Emulates the CD block's own CPU. Needs a CD block ROM image, and is much slower.")
             }
         }
         .navigationTitle("CD Drive")
@@ -878,7 +875,7 @@ struct PerformanceSettingsView: View {
             } header: {
                 Text("Presets")
             } footer: {
-                Text("Presets change the options below, the sound chip settings in Audio and, in Display, Frame Pacing and Frame Delay: Recommended and Best Performance use Match Display and Auto with the sound chip on its own thread; Best Accuracy keeps the Saturn's exact speed and no delay.")
+                WrappedText("Presets change the options below, the sound chip settings in Audio and, in Display, Frame Pacing and Frame Delay: Recommended and Best Performance use Match Display and Auto with the sound chip on its own thread; Best Accuracy keeps the Saturn's exact speed and no delay.")
             }
 
             GlassSection {
@@ -918,7 +915,7 @@ struct PerformanceSettingsView: View {
             } header: {
                 Text("CPU")
             } footer: {
-                Text(recompilerFooter)
+                WrappedText(recompilerFooter)
             }
 
             GlassSection {
@@ -931,7 +928,7 @@ struct PerformanceSettingsView: View {
             } header: {
                 Text("Accuracy")
             } footer: {
-                Text("A few games need the SH-2 cache. Changing the clock may break games, desync audio or cause crashes: above 100% reduces slowdowns, below 100% helps slower devices.")
+                WrappedText("A few games need the SH-2 cache. Changing the clock may break games, desync audio or cause crashes: above 100% reduces slowdowns, below 100% helps slower devices.")
             }
 
             GlassSection {
@@ -942,13 +939,13 @@ struct PerformanceSettingsView: View {
             } header: {
                 Text("Multithreading")
             } footer: {
-                Text("Spreads emulation over several CPU cores for speed.")
+                WrappedText("Spreads emulation over several CPU cores for speed.")
             }
 
             GlassSection {
                 Toggle("Boost Emulator Thread Priority", isOn: store.bool("general.boostEmuThread"))
             } footer: {
-                Text("May reduce stuttering, at the cost of more battery use.")
+                WrappedText("May reduce stuttering, at the cost of more battery use.")
             }
 
             GlassSection {
@@ -956,7 +953,7 @@ struct PerformanceSettingsView: View {
             } header: {
                 Text("Diagnostics")
             } footer: {
-                Text("Measures every frame in detail (frame times, CPU time per thread, GPU time, when frames reach the screen) and writes it to metal-vdp-log.txt in the app's Documents folder every 5 seconds. Nothing is logged while it is off. Leave it off for normal play: measuring costs a little time and battery. Turn it on before the session you want a log of, when sending logs.")
+                WrappedText("Measures every frame in detail (frame times, CPU time per thread, GPU time, when frames reach the screen) and writes it to metal-vdp-log.txt in the app's Documents folder every 5 seconds. Nothing is logged while it is off. Leave it off for normal play: measuring costs a little time and battery. Turn it on before the session you want a log of, when sending logs.")
             }
         }
         .navigationTitle("Advanced")

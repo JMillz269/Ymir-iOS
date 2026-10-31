@@ -187,6 +187,52 @@ extension GlassSection where Header == Text, Footer == EmptyView {
     }
 }
 
+/// A footnote that wraps at the width of the glass content, drawn by UIKit. SwiftUI's own `Text` stayed on one line as wide
+/// as the sentence here (the footers ran off the screen), whatever frame it was put in; a label that is told its width
+/// and measures its height for it can't.
+struct WrappedText: UIViewRepresentable {
+    @Environment(\.glassContentWidth) private var contentWidth
+    private let text: String
+
+    init(_ text: String) {
+        self.text = text
+    }
+
+    /// The width the text has: the content width less the margin on each side
+    private var width: CGFloat {
+        max(1, contentWidth - 32)
+    }
+
+    func makeUIView(context: Context) -> UILabel {
+        let label = UILabel()
+        label.numberOfLines = 0
+        label.lineBreakMode = .byWordWrapping
+        label.adjustsFontForContentSizeCategory = true
+        label.font = UIFont.preferredFont(forTextStyle: .footnote)
+        label.textColor = .secondaryLabel
+        label.backgroundColor = .clear
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return label
+    }
+
+    func updateUIView(_ label: UILabel, context: Context) {
+        label.text = text
+        label.preferredMaxLayoutWidth = width
+    }
+
+    @available(iOS 16.0, *)
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView label: UILabel, context: Context) -> CGSize? {
+        let font = UIFont.preferredFont(forTextStyle: .footnote)
+        let bounds = (text as NSString).boundingRect(
+            with: CGSize(width: width, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font],
+            context: nil)
+        return CGSize(width: width, height: ceil(bounds.height))
+    }
+}
+
 /// A picker row for glass forms: the title on the left and the choice, as a menu, on the right (a plain `Picker`
 /// outside a `Form` puts them next to each other).
 struct GlassPicker<SelectionValue: Hashable, Content: View>: View {
