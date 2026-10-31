@@ -154,6 +154,7 @@ add_library(ymir-core
     include/ymir/media/cd_defs.hpp
     include/ymir/media/cd_interface.hpp
     include/ymir/media/cd_utils.hpp
+    include/ymir/media/chd_convert.hpp
     include/ymir/media/disc.hpp
     include/ymir/media/filesystem.hpp
     include/ymir/media/frame_address.hpp
@@ -317,6 +318,7 @@ add_library(ymir-core
     src/ymir/media/cd_device/cd_device_host.cpp
     src/ymir/media/cd_device/cd_device_image.cpp
 
+    src/ymir/media/chd_convert.cpp
     src/ymir/media/loader/loader.cpp
     src/ymir/media/loader/loader_bin_cue.cpp
     src/ymir/media/loader/loader_chd.cpp
@@ -537,6 +539,14 @@ cmrc_add_resource_library(ymir-core-shaders
     ${COMPILED_SHADERS}
 )
 
+
+## Writing CHD files needs a deflate compressor. The app builds have zlib; a library-only build uses the system's if there
+## is one and otherwise can't convert.
+find_package(ZLIB QUIET)
+if (ZLIB_FOUND)
+    target_link_libraries(ymir-core PRIVATE ZLIB::ZLIB)
+    target_compile_definitions(ymir-core PRIVATE Ymir_HAS_ZLIB=1)
+endif ()
 
 ## Add dependencies
 target_link_libraries(ymir-core PUBLIC
