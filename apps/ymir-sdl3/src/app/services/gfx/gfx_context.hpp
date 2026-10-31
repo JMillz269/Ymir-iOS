@@ -176,10 +176,6 @@ public:
     /// Ignored by backends that can't use it.
     virtual void SetFrameRateHint(double framesPerSecond) {}
 
-    /// @brief Waits until at most `maxQueued` presented frames are still waiting to be shown, or until the timeout
-    /// passes. Used to pace frames by the display. Returns immediately on backends that can't tell.
-    virtual void WaitForDisplay(uint32 maxQueued, double timeoutMs) {}
-
     /// @brief The display's refresh rate as the backend knows it, or 0 if unknown.
     virtual double GetDisplayRefreshRate() const {
         return 0.0;

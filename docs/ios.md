@@ -104,7 +104,8 @@ setting is turned off again and the software renderer is used.
 
 Frame Pacing (Display settings, with Video Sync on) picks how frames are timed. Exact Speed runs the Saturn at its own
 rate (59.83 Hz NTSC) on a timer, so a frame is shown twice about every 6 seconds on a 60 Hz display. Match Display
-waits for the display instead and shows exactly one game frame per display frame (every second refresh at 120 Hz); the
+runs the timer at the display's rate instead (60 Hz, every second refresh at 120 Hz), one game frame per display frame;
+waiting for frames to reach the screen was tried first and let a ProMotion display drop its refresh rate. The
 emulation then runs 0.3% fast and the sound is played back that much faster through the audio stream's frequency ratio,
 nudged to keep the sound buffer half full. Either way the minimum time each frame stays on the screen is rounded to
 whole refreshes of the display, minus half a refresh, so a ProMotion display never holds a frame for an extra refresh.

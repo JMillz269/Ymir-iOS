@@ -38,7 +38,6 @@ CMRC_DECLARE(ymir_sdl3_shaders);
 #include <cstring>
 #include <optional>
 #include <cmath>
-#include <condition_variable>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -388,8 +387,6 @@ struct MetalGraphicsContext::Impl {
     /// When the frames presented actually reached the screen; shared with the presented handlers of the drawables
     struct PresentStats {
         std::mutex mutex;
-        std::condition_variable cv;
-        uint32 pending = 0; ///< presented but not on the screen yet
         double lastShownTime = 0.0;
         double expectedInterval = 0.0; ///< seconds each frame is meant to stay on the screen
         uint32 frames = 0, skipped = 0, held = 0, early = 0;
@@ -418,14 +415,6 @@ struct MetalGraphicsContext::Impl {
         const double ticks = std::max(1.0, std::round(refresh / frameRateHint));
         *expected = ticks / refresh;
         return (ticks - 0.5) / refresh;
-    }
-
-    /// Waits until at most maxQueued frames are still waiting to reach the screen, or until the timeout passes
-    void WaitForDisplay(uint32 maxQueued, double timeoutMs) {
-        PresentStats &st = *presentStats;
-        std::unique_lock lock{st.mutex};
-        st.cv.wait_for(lock, std::chrono::duration<double, std::milli>(timeoutMs),
-                       [&] { return st.pending <= maxQueued; });
     }
 
     // -- Post processing filters --
@@ -1063,7 +1052,6 @@ struct MetalGraphicsContext::Impl {
                 const double minDuration = frameRateHint > 0.0 ? MinimumFrameDuration(&expected) : 0.0;
                 {
                     std::lock_guard lock{presentStats->mutex};
-                    ++presentStats->pending;
                     presentStats->expectedInterval = expected;
                 }
                 std::shared_ptr<PresentStats> stats = presentStats;
@@ -1073,7 +1061,6 @@ struct MetalGraphicsContext::Impl {
                   PresentStats &st = *stats;
                   {
                       std::lock_guard lock{st.mutex};
-                      st.pending = st.pending > 0 ? st.pending - 1 : 0;
                       if (shown <= 0.0) {
                           ++st.skipped; // replaced by a newer frame before it could be shown
                       } else {
@@ -1101,7 +1088,6 @@ struct MetalGraphicsContext::Impl {
                           st.intervalSum = st.worstInterval = 0.0;
                       }
                   }
-                  st.cv.notify_all();
                 }];
                 if (frameRateHint > 0.0) {
                     // Lets a variable refresh rate (ProMotion) display settle at the rate frames are produced at
@@ -1833,10 +1819,6 @@ bool MetalGraphicsContext::SupportsUpscaling() const {
 
 void MetalGraphicsContext::SetFrameRateHint(double framesPerSecond) {
     m_impl->frameRateHint = framesPerSecond;
-}
-
-void MetalGraphicsContext::WaitForDisplay(uint32 maxQueued, double timeoutMs) {
-    m_impl->WaitForDisplay(maxQueued, timeoutMs);
 }
 
 double MetalGraphicsContext::GetDisplayRefreshRate() const {

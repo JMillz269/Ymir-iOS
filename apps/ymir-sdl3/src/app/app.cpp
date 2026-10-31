@@ -1622,8 +1622,8 @@ void App::RunEmulator() {
                 maxFrameRate = std::max(maxFrameRate, 48.0);
             }
 
-            // Frame pacing by the display: show one game frame on every display frame (or every two at 120 Hz) instead
-            // of on a timer at the Saturn's own rate. Emulation and sound then run that much faster or slower (0.3%
+            // Frame pacing by the display: show one game frame on every display frame (or every two at 120 Hz),
+            // timed at the display's rate instead of the Saturn's own rate. Emulation and sound then run that much faster or slower (0.3%
             // for 59.83 Hz shown at 60 Hz), and no frame is ever shown twice or skipped because the two rates drift
             // apart. Only for rates close enough to the display's.
             bool displayPaced = false;
@@ -1697,11 +1697,10 @@ void App::RunEmulator() {
                     frameInterval * avgFrameDelay * frameIntervalAdjustFactor);
             }
 
-            if (displayPaced) {
-                // The display sets the pace: go on once no more than one frame is still waiting to be shown
-                m_graphicsService.WaitForDisplay(1, 50.0);
-                screen.nextFrameTarget = clk::now();
-            } else if (screen.videoSync) {
+            // (with display pacing too: waiting for frames to reach the screen instead let a ProMotion display lower
+            // its refresh rate, which slowed frames down further, down to 13-19 fps; the timer runs at the display's
+            // rate instead, which the frame duration rounding keeps in step with the refreshes)
+            if (screen.videoSync) {
                 // Sleep until 1ms before the next frame presentation time, then spin wait for the deadline
                 bool skipDelay = false;
                 auto now = clk::now();
