@@ -494,17 +494,21 @@ private struct GameTile: View {
                             .padding(8)
                     }
                 }
+            // The name and the disc image type sit on a Liquid Glass card, like the groups in Settings. The title always
+            // takes two lines, so that the cards of a row are as tall as each other
             VStack(alignment: .leading, spacing: 2) {
                 Text(game.title)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.primary)
-                    .lineLimit(2)
+                    .lineLimit(2, reservesSpace: true)
                     .multilineTextAlignment(.leading)
                 Text(game.format)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            .frame(width: side, alignment: .leading)
+            .frame(width: max(0, side - 24), alignment: .leading)
+            .padding(12)
+            .ymirGlassCard(cornerRadius: 18)
         }
         .contentShape(Rectangle())
     }
