@@ -64,6 +64,12 @@
     <true/>
     <key>GCSupportsControllerUserInteraction</key>
     <true/>
+    <!-- Game Mode: lets the system give the game priority on the CPU and GPU, and lowers the latency of controllers and
+         AirPods while it is running (needs the games category below) -->
+    <key>GCSupportsGameMode</key>
+    <true/>
+    <key>LSSupportsGameMode</key>
+    <true/>
 
     <!-- Expose the Documents directory (profile, BIOS images, games, saves) in the Files app -->
     <key>UIFileSharingEnabled</key>
