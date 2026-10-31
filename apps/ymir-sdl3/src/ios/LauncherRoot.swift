@@ -131,7 +131,6 @@ struct GamesView: View {
             }
             }
             }
-            }
             .environment(\.editMode, $editMode)
             .onChange(of: canReorder) { value in
                 if !value {
