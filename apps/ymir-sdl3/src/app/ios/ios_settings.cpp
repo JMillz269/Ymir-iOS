@@ -281,6 +281,10 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
             });
     addBool("general.performanceLog", [cfg] { return cfg->general.performanceLog; },
             [cfg](bool v) { cfg->general.performanceLog = v; });
+    addBool("general.autoSaveState", [cfg] { return cfg->general.autoSaveState; },
+            [cfg](bool v) { cfg->general.autoSaveState = v; });
+    addBool("general.pauseWhenUnfocused", [cfg] { return cfg->general.pauseWhenUnfocused; },
+            [cfg](bool v) { cfg->general.pauseWhenUnfocused = v; });
     addBool("general.rewind", [cfg] { return cfg->general.enableRewindBuffer; },
             [cfg, ctx](bool v) {
                 cfg->general.enableRewindBuffer = v;

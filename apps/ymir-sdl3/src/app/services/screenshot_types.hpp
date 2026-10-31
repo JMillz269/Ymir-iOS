@@ -3,6 +3,7 @@
 #include <app/settings.hpp>
 
 #include <chrono>
+#include <filesystem>
 #include <vector>
 
 namespace app::screenshot {
@@ -15,6 +16,9 @@ struct Screenshot {
     int ssScale;
     Settings::Video::DisplayRotation rotation;
     std::chrono::system_clock::time_point timestamp;
+
+    /// If not empty, this is not a screenshot but the thumbnail of a save state, written to this file as a small JPEG.
+    std::filesystem::path thumbnailPath{};
 };
 
 } // namespace app::screenshot

@@ -630,6 +630,7 @@ if (IOS)
         "-framework Metal"
         "-framework MetalFX"
         "-framework QuartzCore"
+        "-framework AVFoundation"
     )
 endif ()
 target_compile_features(ymir-sdl3 PUBLIC cxx_std_20)

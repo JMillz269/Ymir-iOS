@@ -876,6 +876,29 @@ EmuEvent SaveState(uint32 slotIndex) {
     });
 }
 
+EmuEvent AutoSaveState(std::function<void()> done) {
+    return RunFunction([done = std::move(done)](SharedContext &ctx) {
+        auto &saves = ctx.serviceLocator.GetRequired<services::SaveStateService>();
+        constexpr std::size_t slotIndex = services::SaveStateService::kAutoSlot;
+
+        if (!ctx.state.loadedDiscImagePath.empty()) {
+            {
+                auto lock = std::unique_lock{saves.SlotMutex(slotIndex)};
+                auto *slot = saves.Push(slotIndex);
+                if (slot != nullptr) {
+                    ctx.saturn.instance->SaveState(*slot->state);
+                    slot->timestamp = std::chrono::system_clock::now();
+                }
+            }
+            // (written here, not by the GUI thread: it may not get to run again before the app is suspended)
+            saves.PersistSaveState(slotIndex);
+        }
+        if (done) {
+            done();
+        }
+    });
+}
+
 EmuEvent UndoSaveState() {
     return RunFunction([](SharedContext &ctx) {
         auto &saves = ctx.serviceLocator.GetRequired<services::SaveStateService>();

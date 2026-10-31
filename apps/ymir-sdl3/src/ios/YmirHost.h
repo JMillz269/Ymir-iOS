@@ -36,6 +36,9 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)openCloseTray NS_SWIFT_NAME(openCloseTray());
 + (void)ejectDisc NS_SWIFT_NAME(ejectDisc());
 + (void)saveStateToSlot:(NSInteger)slot NS_SWIFT_NAME(saveState(slot:));
+/// Saves a state of the loaded game into the autosave slot, unless the player turned that off. The completion block is
+/// called on another thread when it's written, or at once if there was nothing to save.
++ (void)autoSaveWithCompletion:(nullable void (^)(void))completion NS_SWIFT_NAME(autoSave(completion:));
 + (void)loadStateFromSlot:(NSInteger)slot NS_SWIFT_NAME(loadState(slot:));
 + (void)deleteStateInSlot:(NSInteger)slot NS_SWIFT_NAME(deleteState(slot:));
 /// The file holding the save state of a slot of the loaded game, or nil if there is none.

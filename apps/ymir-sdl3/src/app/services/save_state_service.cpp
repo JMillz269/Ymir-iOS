@@ -201,6 +201,8 @@ void SaveStateService::ClearSaveStates() {
 
         std::filesystem::remove(gameStatesPath / fmt::format("{}.savestate", slotIndex));
         std::filesystem::remove(gameStatesPath / fmt::format("{}-1.savestate", slotIndex));
+        std::error_code error{};
+        std::filesystem::remove(gameStatesPath / fmt::format("{}.jpg", slotIndex), error);
     }
     m_context.DisplayMessage("All save states cleared");
 }
@@ -219,6 +221,7 @@ void SaveStateService::DeleteSaveStateSlot(std::size_t slotIndex) {
     std::error_code error{};
     std::filesystem::remove(gameStatesPath / fmt::format("{}.savestate", slotIndex), error);
     std::filesystem::remove(gameStatesPath / fmt::format("{}-1.savestate", slotIndex), error);
+    std::filesystem::remove(gameStatesPath / fmt::format("{}.jpg", slotIndex), error);
     m_context.DisplayMessage(fmt::format("State {} deleted", slotIndex + 1));
 }
 
@@ -231,6 +234,14 @@ std::filesystem::path SaveStateService::SaveStateSlotPath(std::size_t slotIndex)
                      fmt::format("{}.savestate", slotIndex);
     std::error_code error{};
     return std::filesystem::is_regular_file(statePath, error) ? statePath : std::filesystem::path{};
+}
+
+std::filesystem::path SaveStateService::ThumbnailPath(std::size_t slotIndex) const {
+    if (!IsValidIndex(slotIndex)) {
+        return {};
+    }
+    auto basePath = m_context.profile.GetPath(app::ProfilePath::SaveStates);
+    return basePath / ymir::ToString(m_context.saturn.instance->GetDiscHash()) / fmt::format("{}.jpg", slotIndex);
 }
 
 void SaveStateService::LoadSaveStateSlot(std::size_t slotIndex) {
@@ -281,7 +292,9 @@ void SaveStateService::PersistSaveState(std::size_t slotIndex) {
             save(slot->backup.state, fmt::format("{}-1.savestate", slotIndex));
             WriteSaveStateMeta();
             WriteGameLink();
-            m_context.DisplayMessage(fmt::format("State {} saved", slotIndex + 1));
+            if (slotIndex != kAutoSlot) {
+                m_context.DisplayMessage(fmt::format("State {} saved", slotIndex + 1));
+            }
         }
     }
 }

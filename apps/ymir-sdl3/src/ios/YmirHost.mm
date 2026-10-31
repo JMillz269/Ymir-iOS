@@ -1,6 +1,10 @@
 #import "YmirHost.h"
 
+#import <AVFoundation/AVFoundation.h>
+#import <QuartzCore/QuartzCore.h>
+
 #include <app/ios/host_interface.hpp>
+#include <util/ios_platform.hpp>
 
 #include <ymir/hw/sh2/sh2_recompiler.hpp>
 #include <ymir/util/perf_counters.hpp>
@@ -20,6 +24,66 @@ static NSString *ToNSString(const std::filesystem::path &path) {
 }
 
 @implementation YmirHost
+
+/// Reacts to what the system does to the app: leaving the game when it's covered or sent to the background, and the
+/// sound going away from headphones.
++ (void)load {
+    NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
+
+    // The app is about to be covered or sent to the background (the control center, a call, the app switcher, the home
+    // screen): the state of the game is saved, as the system may close the app without a warning from then on. This is
+    // done here, not once the app is in the background: the picture of the game is read back from the GPU, which isn't
+    // allowed there, and the emulator thread may be stuck waiting for the display by then. Asks for time to finish
+    // writing it. Not more often than every few seconds.
+    [center addObserverForName:UIApplicationWillResignActiveNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *) {
+                        static CFTimeInterval lastAutoSave = 0.0;
+                        const CFTimeInterval now = CACurrentMediaTime();
+                        if (now - lastAutoSave < 5.0) {
+                            return;
+                        }
+                        lastAutoSave = now;
+
+                        __block UIBackgroundTaskIdentifier task = UIBackgroundTaskInvalid;
+                        task = [[UIApplication sharedApplication]
+                            beginBackgroundTaskWithName:@"Ymir autosave"
+                                      expirationHandler:^{
+                                          if (task != UIBackgroundTaskInvalid) {
+                                              [[UIApplication sharedApplication] endBackgroundTask:task];
+                                              task = UIBackgroundTaskInvalid;
+                                          }
+                                      }];
+                        [YmirHost autoSaveWithCompletion:^{
+                          dispatch_async(dispatch_get_main_queue(), ^{
+                            if (task != UIBackgroundTaskInvalid) {
+                                [[UIApplication sharedApplication] endBackgroundTask:task];
+                                task = UIBackgroundTaskInvalid;
+                            }
+                          });
+                        }];
+                    }];
+
+    // Headphones or a Bluetooth speaker went away: the sound would come out of the phone's speaker. Pause the game by
+    // opening the in-game menu; closing it carries on.
+    [center addObserverForName:AVAudioSessionRouteChangeNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
+                        const NSUInteger reason =
+                            [note.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue];
+                        if (reason != AVAudioSessionRouteChangeReasonOldDeviceUnavailable) {
+                            return;
+                        }
+                        auto &host = app::ios::GetHost();
+                        const bool playing = host.isDiscLoaded && host.isDiscLoaded() && host.isPaused &&
+                                             !host.isPaused() && !util::ios::IsNativeUIVisible();
+                        if (playing && [UIApplication sharedApplication].applicationState == UIApplicationStateActive) {
+                            util::ios::ShowGameMenu();
+                        }
+                    }];
+}
 
 + (UIWindow *)gameWindow {
     return s_gameWindow;
@@ -168,6 +232,23 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     if (host.saveState) {
         host.saveState(static_cast<int>(slot));
     }
+}
+
++ (void)autoSaveWithCompletion:(void (^)(void))completion {
+    auto &host = app::ios::GetHost();
+    if (!host.autoSave) {
+        if (completion) {
+            completion();
+        }
+        return;
+    }
+    // (the block is called on the emulator thread)
+    void (^block)(void) = [completion copy];
+    host.autoSave([block] {
+        if (block) {
+            block();
+        }
+    });
 }
 
 + (void)loadStateFromSlot:(NSInteger)slot {

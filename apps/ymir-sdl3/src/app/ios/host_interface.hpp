@@ -41,6 +41,9 @@ struct HostInterface {
     std::function<void()> ejectDisc;
     std::function<void()> quitGame; // unloads the game and leaves the emulator idle
     std::function<void(int)> saveState;
+    // Saves a state of the game into the autosave slot (if the setting is on); calls the function on the emulator
+    // thread when that's done, or right away if there was nothing to do
+    std::function<void(std::function<void()>)> autoSave;
     std::function<void(int)> loadState;
     std::function<void(int)> deleteState;
     std::function<void()> takeScreenshot;

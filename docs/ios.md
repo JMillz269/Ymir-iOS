@@ -131,6 +131,14 @@ a game is in full screen: the system then gives the game priority on the CPU and
 controllers and AirPods. Whether it is on is up to the system (Control Center shows it); the stats panel shows it too.
 When the app is run inside another app (LiveContainer), the system goes by that app's own settings instead.
 
+Autosave (Emulation settings, on by default) saves a state of the game into a slot of its own, "Autosave", whenever the
+game is left: the app is covered or sent to the background (the control center, a call, the app switcher, the home
+screen; not more often than every 5 seconds), the game is closed, or another game or state is started or loaded (not when
+the Autosave itself is loaded). The emulator thread writes it while the app is still active, as the picture of the game is
+read back from the GPU for its thumbnail, which isn't allowed in the background. Save states get a small thumbnail
+(`<slot>.jpg` next to them) of the frame on the display when they are saved. Pause When Interrupted pauses the game while the
+app is not active, and the game menu opens when headphones are unplugged.
+
 Save States (Settings) lists the save states of every game, with their date and size: Load starts the game and continues
 from the state, Export shares a copy and Delete removes it (or all of a game's states). Long-pressing a game in the
 library offers Load State with the game's slots, newest first. Save states are kept per game in

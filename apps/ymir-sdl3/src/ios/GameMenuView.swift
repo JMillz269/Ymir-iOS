@@ -166,6 +166,14 @@ struct SaveStatesView: View {
         let present: Bool
         let text: String
         var id: Int { index }
+        var isAuto: Bool { index == YmirShell.autoSlotIndex }
+        var title: String { isAuto ? "Autosave" : "Slot \(index + 1)" }
+        /// The small picture saved with the state, if there is one
+        var thumbnailURL: URL? {
+            guard present, let path = YmirHost.saveStatePath(slot: index) else { return nil }
+            let url = URL(fileURLWithPath: path).deletingPathExtension().appendingPathExtension("jpg")
+            return FileManager.default.fileExists(atPath: url.path) ? url : nil
+        }
     }
 
     /// A save state file copied under a readable name, for the share sheet
@@ -192,7 +200,7 @@ struct SaveStatesView: View {
         }
         let game = YmirHost.loadedGamePath.map { URL(fileURLWithPath: $0).deletingPathExtension().lastPathComponent }
             ?? "Ymir"
-        let name = "\(game) - Slot \(slot.index + 1).savestate".replacingOccurrences(of: "/", with: "-")
+        let name = "\(game) - \(slot.title).savestate".replacingOccurrences(of: "/", with: "-")
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("SaveStateExport", isDirectory: true)
         let target = folder.appendingPathComponent(name)
         do {
@@ -210,20 +218,25 @@ struct SaveStatesView: View {
             Section {
                 ForEach(slots) { slot in
                     HStack {
+                        if slot.present {
+                            SlotThumbnail(url: slot.thumbnailURL, width: 56)
+                        }
                         VStack(alignment: .leading, spacing: 2) {
-                            Text("Slot \(slot.index + 1)")
+                            Text(slot.title)
                             Text(slot.present ? slot.text : "Empty")
                                 .font(.footnote)
                                 .foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Button("Save") {
-                            YmirHost.saveState(slot: slot.index)
-                            slots = Self.readSlots()
-                            // Saving happens on the emulator thread; read again once it had time to finish
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { slots = Self.readSlots() }
+                        if !slot.isAuto {
+                            Button("Save") {
+                                YmirHost.saveState(slot: slot.index)
+                                slots = Self.readSlots()
+                                // Saving happens on the emulator thread; read again once it had time to finish
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { slots = Self.readSlots() }
+                            }
+                            .ymirSecondaryButton()
                         }
-                        .ymirSecondaryButton()
                         Button("Load") {
                             YmirHost.loadState(slot: slot.index)
                             state.keepPaused = false
@@ -248,7 +261,7 @@ struct SaveStatesView: View {
                                 .frame(minWidth: 32, minHeight: 32)
                         }
                         .disabled(!slot.present)
-                        .accessibilityLabel("More for slot \(slot.index + 1)")
+                        .accessibilityLabel("More for \(slot.title)")
                     }
                     .buttonStyle(.borderless)
                     .swipeActions(edge: .trailing) {
@@ -269,7 +282,7 @@ struct SaveStatesView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { slots = Self.readSlots() }
         .confirmationDialog(
-            "Delete the save state in slot \((slotToDelete?.index ?? 0) + 1)?",
+            "Delete the save state in \(slotToDelete?.title ?? "this slot")?",
             isPresented: Binding(get: { slotToDelete != nil }, set: { if !$0 { slotToDelete = nil } }),
             titleVisibility: .visible
         ) {

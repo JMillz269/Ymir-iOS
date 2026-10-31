@@ -12,6 +12,7 @@
 #include <ymir/util/fmt_ratio.hpp>
 
 #include <util/math.hpp>
+#include <util/platform.hpp>
 
 #include <cassert>
 #include <concepts>
@@ -1032,7 +1033,9 @@ void Settings::ResetToDefaults() {
     general.altSpeedFactor = 0.5;
     general.useAltSpeed = false;
 
-    general.pauseWhenUnfocused = false;
+    // (on a phone: pulling down the control center, a notification, the app switcher or a call take the focus away)
+    general.pauseWhenUnfocused = YMIR_PLATFORM_IOS != 0;
+    general.autoSaveState = true;
     general.unpauseOnDiscLoad = true;
     general.startPaused = false;
 
@@ -1131,7 +1134,7 @@ void Settings::ResetToDefaults() {
     video.useFullRefreshRateWithVideoSync = false;
     video.reduceLatency = true;
     video.metalFXMode = 0;
-    video.frameDelay = 0;
+    video.frameDelay = YMIR_PLATFORM_IOS != 0 ? 1 : 0; // Auto on a phone (see UpdateFrameDelay)
     video.framePacing = 1; // Match Display: steadiest on iPhone (a frame held over about every 5 s instead of about every second)
     video.forceStretch = false;
     video.portraitStretchHeight = 0.0f;
@@ -1167,7 +1170,7 @@ void Settings::ResetToDefaults() {
 
     audio.interpolation = config::audio::SampleInterpolationMode::Linear;
 
-    audio.threadedSCSP = false;
+    audio.threadedSCSP = YMIR_PLATFORM_IOS != 0; // (cheap on a phone since the sound thread sleeps between batches)
 
     audio.stepGranularity = 0;
 
@@ -1259,6 +1262,7 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblGeneral, "AltSpeedFactor", general.altSpeedFactor);
         Parse(tblGeneral, "UseAltSpeed", general.useAltSpeed);
         Parse(tblGeneral, "PauseWhenUnfocused", general.pauseWhenUnfocused);
+        Parse(tblGeneral, "AutoSaveState", general.autoSaveState);
         Parse(tblGeneral, "UnpauseOnDiscLoadd", general.unpauseOnDiscLoad);
         Parse(tblGeneral, "StartPaused", general.startPaused);
         Parse(tblGeneral, "CheckForUpdates", general.checkForUpdates);
@@ -1936,6 +1940,7 @@ SettingsSaveResult Settings::Save() {
             {"AltSpeedFactor", general.altSpeedFactor.Get()},
             {"UseAltSpeed", general.useAltSpeed.Get()},
             {"PauseWhenUnfocused", general.pauseWhenUnfocused},
+            {"AutoSaveState", general.autoSaveState},
             {"UnpauseOnDiscLoad", general.unpauseOnDiscLoad},
             {"StartPaused", general.startPaused},
             {"CheckForUpdates", general.checkForUpdates},

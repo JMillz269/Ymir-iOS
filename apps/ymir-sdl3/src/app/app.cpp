@@ -1485,6 +1485,84 @@ void App::RunEmulator() {
     std::unordered_map<SDL_JoystickID, SDL_Gamepad *> gamepads{};
     PlayerIndexMap gamepadPlayerIndices;
 
+    // Captures the frame on the display (hardware renderers read it back from the GPU). Used by screenshots and by the
+    // thumbnails of save states.
+    auto captureScreenshot = [&](screenshot::Screenshot &ss) {
+        bool downloaded = true;
+        ss.fbWidth = screen.width;
+        ss.fbHeight = screen.height;
+        if (vdp.GetRenderer().IsHardwareRenderer()) {
+            // Hardware renderers always copy the full resolution texture
+            ss.fb.resize(vdp::kMaxResH * vdp::kMaxResV);
+            const size_t framebufferSize = vdp::kMaxResH * vdp::kMaxResV * sizeof(uint32);
+            gfx::IGraphicsContext &gfxCtx = m_graphicsService.GetGraphicsContext();
+            auto result = gfxCtx.DownloadDisplayOutputTexture(ss.fb.data(), framebufferSize);
+            if (result) {
+                const size_t copySize = result.Value();
+                if (copySize < framebufferSize) {
+                    devlog::warn<grp::base>(
+                        "Display framebuffer not fully downloaded. Expected {} bytes, got {} bytes",
+                        framebufferSize, copySize);
+                }
+            } else {
+                downloaded = false;
+                m_context.DisplayMessage(
+                    fmt::format("Display framebuffer could not be downloaded: {}", result.Error().message));
+            }
+
+            // Shrink it down to size in-place
+            for (uint32 y = 1; y < screen.height; ++y) {
+                const size_t srcPos = y * vdp::kMaxResH;
+                const size_t dstPos = y * screen.width;
+                std::copy_n(&ss.fb[srcPos], screen.width, &ss.fb[dstPos]);
+            }
+            ss.fb.resize(screen.width * screen.height);
+        } else if (screen.directDisplay) {
+            // The renderer handed the frame to the graphics context on the GPU; read it back from there
+            const uint32 fbScale = screen.DisplayFramebufferScale();
+            ss.fbWidth = screen.width * fbScale;
+            ss.fbHeight = screen.height * fbScale;
+            ss.fb.resize(size_t(ss.fbWidth) * ss.fbHeight);
+            gfx::IGraphicsContext &gfxCtx = m_graphicsService.GetGraphicsContext();
+            auto result = gfxCtx.DownloadDisplayOutputTexture(ss.fb.data(), ss.fb.size() * sizeof(uint32));
+            if (!result) {
+                downloaded = false;
+                m_context.DisplayMessage(
+                    fmt::format("Display framebuffer could not be downloaded: {}", result.Error().message));
+            }
+        } else {
+            // The software renderer already outputs the frame in a compact vector
+            const uint32 fbScale = screen.DisplayFramebufferScale();
+            ss.fbWidth = screen.width * fbScale;
+            ss.fbHeight = screen.height * fbScale;
+            ss.fb.resize(size_t(ss.fbWidth) * ss.fbHeight);
+            const auto &fb = screen.framebuffers[screen.currBackFramebuffer ^ 1u];
+            std::copy_n(fb.begin(), ss.fb.size(), ss.fb.begin());
+        }
+        ss.fbScaleX = screen.scaleX;
+        ss.fbScaleY = screen.scaleY;
+        return downloaded && !ss.fb.empty();
+    };
+
+    // Writes the thumbnail of a slot of the game that is loaded: a small picture of the frame on the display
+    auto saveThumbnail = [&](std::size_t slotIndex) {
+        const std::filesystem::path path = m_saveStateService.ThumbnailPath(slotIndex);
+        if (path.empty() || m_context.state.loadedDiscImagePath.empty()) {
+            return;
+        }
+        screenshot::Screenshot ss{};
+        if (captureScreenshot(ss)) {
+            ss.thumbnailPath = path;
+            services::ScreenshotService::WriteThumbnail(ss);
+        }
+    };
+
+    // Writes a state that was just saved to its file, with its thumbnail
+    auto persistSavedState = [&](uint32 slotIndex) {
+        m_saveStateService.PersistSaveState(slotIndex);
+        saveThumbnail(slotIndex);
+    };
+
 #if YMIR_PLATFORM_IOS
     // On-screen control pad, driven by touch events. Hidden while a hardware gamepad is connected.
     input::TouchControls touchControls{m_context.inputContext};
@@ -1533,6 +1611,21 @@ void App::RunEmulator() {
         m_context.emuSpeed.limitSpeed = true;
         m_context.audioSystem.SetSync(m_context.emuSpeed.ShouldSyncToAudio());
         m_saveStateService.LoadSaveStateSlot(static_cast<std::size_t>(slot));
+    };
+    iosHost.autoSave = [this, saveThumbnail, &screen](std::function<void()> done) {
+        if (!m_settings.general.autoSaveState || m_context.state.loadedDiscImagePath.empty()) {
+            if (done) {
+                done();
+            }
+            return;
+        }
+        // (the picture is taken here, where the frame is on the display; the state itself on the emulator thread)
+        saveThumbnail(services::SaveStateService::kAutoSlot);
+        m_context.EnqueueEvent(events::emu::AutoSaveState(std::move(done)));
+        // The emulator thread may be waiting for the GUI thread to hand it the next frame, which won't come if the app
+        // is on its way to the background: let it go on to the event
+        screen.frameRequestEvent.Set();
+        m_emuProcessEvent.Set();
     };
     iosHost.setPaused = [this](bool paused) { m_context.EnqueueEvent(events::emu::SetPaused(paused)); };
     iosHost.setFastForward = [this](bool enable) {
@@ -2075,7 +2168,7 @@ void App::RunEmulator() {
                 const size_t count = m_context.eventQueues.gui.try_dequeue_bulk(evts.begin(), evts.size());
                 for (size_t i = 0; i < count; i++) {
                     if (evts[i].type == GUIEvent::Type::StateSaved) {
-                        m_saveStateService.PersistSaveState(std::get<uint32>(evts[i].value));
+                        persistSavedState(std::get<uint32>(evts[i].value));
                     } else {
                         deferredGUIEvents.push_back(evts[i]);
                     }
@@ -2298,54 +2391,7 @@ void App::RunEmulator() {
             case EvtType::TakeScreenshot: //
             {
                 screenshot::Screenshot ss{};
-                ss.fbWidth = screen.width;
-                ss.fbHeight = screen.height;
-                if (vdp.GetRenderer().IsHardwareRenderer()) {
-                    // Hardware renderers always copy the full resolution texture
-                    ss.fb.resize(vdp::kMaxResH * vdp::kMaxResV);
-                    const size_t framebufferSize = vdp::kMaxResH * vdp::kMaxResV * sizeof(uint32);
-                    gfx::IGraphicsContext &gfxCtx = m_graphicsService.GetGraphicsContext();
-                    auto result = gfxCtx.DownloadDisplayOutputTexture(ss.fb.data(), framebufferSize);
-                    if (result) {
-                        const size_t copySize = result.Value();
-                        if (copySize < framebufferSize) {
-                            devlog::warn<grp::base>(
-                                "Display framebuffer not fully downloaded. Expected {} bytes, got {} bytes",
-                                framebufferSize, copySize);
-                        }
-                    } else {
-                        m_context.DisplayMessage(
-                            fmt::format("Display framebuffer could not be downloaded: {}", result.Error().message));
-                    }
-
-                    // Shrink it down to size in-place
-                    for (uint32 y = 1; y < screen.height; ++y) {
-                        const size_t srcPos = y * vdp::kMaxResH;
-                        const size_t dstPos = y * screen.width;
-                        std::copy_n(&ss.fb[srcPos], screen.width, &ss.fb[dstPos]);
-                    }
-                    ss.fb.resize(screen.width * screen.height);
-                } else if (screen.directDisplay) {
-                    // The renderer handed the frame to the graphics context on the GPU; read it back from there
-                    const uint32 fbScale = screen.DisplayFramebufferScale();
-                    ss.fbWidth = screen.width * fbScale;
-                    ss.fbHeight = screen.height * fbScale;
-                    ss.fb.resize(size_t(ss.fbWidth) * ss.fbHeight);
-                    gfx::IGraphicsContext &gfxCtx = m_graphicsService.GetGraphicsContext();
-                    auto result = gfxCtx.DownloadDisplayOutputTexture(ss.fb.data(), ss.fb.size() * sizeof(uint32));
-                    if (!result) {
-                        m_context.DisplayMessage(
-                            fmt::format("Display framebuffer could not be downloaded: {}", result.Error().message));
-                    }
-                } else {
-                    // The software renderer already outputs the frame in a compact vector
-                    const uint32 fbScale = screen.DisplayFramebufferScale();
-                    ss.fbWidth = screen.width * fbScale;
-                    ss.fbHeight = screen.height * fbScale;
-                    ss.fb.resize(size_t(ss.fbWidth) * ss.fbHeight);
-                    const auto &fb = screen.framebuffers[screen.currBackFramebuffer ^ 1u];
-                    std::copy_n(fb.begin(), ss.fb.size(), ss.fb.begin());
-                }
+                captureScreenshot(ss);
                 ss.fbScaleX = screen.scaleX;
                 ss.fbScaleY = screen.scaleY;
                 ss.ssScale = settings.general.screenshotScale;
@@ -2360,7 +2406,7 @@ void App::RunEmulator() {
             case EvtType::StateLoaded:
                 m_context.DisplayMessage(fmt::format("State {} loaded", std::get<uint32>(evt.value) + 1));
                 break;
-            case EvtType::StateSaved: m_saveStateService.PersistSaveState(std::get<uint32>(evt.value)); break;
+            case EvtType::StateSaved: persistSavedState(std::get<uint32>(evt.value)); break;
             }
         }
 
@@ -2631,6 +2677,9 @@ void App::RunEmulator() {
 
                         for (const auto &slotMeta : m_saveStateService.List()) {
                             const auto slotIndex = slotMeta.index;
+                            if (slotIndex >= services::SaveStateService::kUserSlots) {
+                                continue; // (the autosave slot isn't in the menus)
+                            }
                             const auto shortcut = input::ToShortcut(
                                 inputContext, save ? actions::save_states::GetSaveStateAction(slotIndex)
                                                    : actions::save_states::GetLoadStateAction(slotIndex));

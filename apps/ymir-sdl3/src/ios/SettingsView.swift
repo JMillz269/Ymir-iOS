@@ -465,9 +465,15 @@ struct EmulationSettingsView: View {
                 Text("Switch between the two speeds to slow the game down or run it faster. Fast forward in the in-game menu ignores them.")
             }
 
-            Section("Behavior") {
+            Section {
                 Toggle("Unpause After Loading a Game", isOn: store.bool("general.unpauseOnDiscLoad", default: true))
+                Toggle("Pause When Interrupted", isOn: store.bool("general.pauseWhenUnfocused", default: true))
+                Toggle("Autosave When Leaving a Game", isOn: store.bool("general.autoSaveState", default: true))
                 Toggle("Preload Disc Images to RAM", isOn: store.bool("general.preloadDiscImages"))
+            } header: {
+                Text("Behavior")
+            } footer: {
+                Text("Pause When Interrupted pauses the game while something covers it (the control center, a notification, a call, the app switcher). Autosave keeps a state of the game in its own slot whenever you leave it: the app goes to the background, you close the game, or you start or load something else. Find it in Save States.")
             }
 
             Section {
@@ -649,18 +655,18 @@ struct PerformanceSettingsView: View {
         Form {
             Section {
                 Button("Recommended") {
-                    apply(sh2Cache: false, interpolation: 1, granularity: 0, lle: false)
+                    apply(sh2Cache: false, interpolation: 1, granularity: 0, lle: false, smooth: true)
                 }
                 Button("Best Accuracy") {
-                    apply(sh2Cache: true, interpolation: 1, granularity: 5, lle: false)
+                    apply(sh2Cache: true, interpolation: 1, granularity: 5, lle: false, smooth: false)
                 }
                 Button("Best Performance") {
-                    apply(sh2Cache: false, interpolation: 0, granularity: 0, lle: false)
+                    apply(sh2Cache: false, interpolation: 0, granularity: 0, lle: false, smooth: true)
                 }
             } header: {
                 Text("Presets")
             } footer: {
-                Text("Presets change the options below and the sound chip settings in Audio.")
+                Text("Presets change the options below, the sound chip settings in Audio and, in Display, Frame Pacing and Frame Delay: Recommended and Best Performance use Match Display and Auto with the sound chip on its own thread; Best Accuracy keeps the Saturn's exact speed and no delay.")
             }
 
             Section {
@@ -784,7 +790,10 @@ struct PerformanceSettingsView: View {
         attempt(0)
     }
 
-    private func apply(sh2Cache: Bool, interpolation: Int, granularity: Int, lle: Bool) {
+    private func apply(sh2Cache: Bool, interpolation: Int, granularity: Int, lle: Bool, smooth: Bool) {
+        store.bool("audio.threadedSCSP").wrappedValue = smooth
+        store.int("video.framePacing").wrappedValue = smooth ? 1 : 0
+        store.int("video.frameDelay").wrappedValue = smooth ? 1 : 0
         store.bool("system.emulateSH2Cache").wrappedValue = sh2Cache
         store.intSlider("system.sh2ClockFactor").wrappedValue = 100
         store.int("audio.interpolation").wrappedValue = interpolation

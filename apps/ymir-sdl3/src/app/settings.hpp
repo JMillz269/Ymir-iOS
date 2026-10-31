@@ -159,6 +159,9 @@ struct Settings {
         util::Observable<bool> useAltSpeed;
 
         bool pauseWhenUnfocused;
+        // Save a state of the game when it's left (the app is closed or sent to the background, the game is closed or
+        // another one started), into a slot of its own (iOS)
+        bool autoSaveState;
         bool unpauseOnDiscLoad;
         bool startPaused;
 

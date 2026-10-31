@@ -15,7 +15,14 @@ struct SavedSlot: Identifiable, Hashable {
     var backupURL: URL { folder.appendingPathComponent("\(index)-1.savestate") }
     var id: String { url.path }
 
-    var title: String { "Slot \(index + 1)" }
+    /// The slot the app fills by itself when a game is left.
+    var isAuto: Bool { index == YmirShell.autoSlotIndex }
+    var title: String { isAuto ? "Autosave" : "Slot \(index + 1)" }
+    /// A small picture of the game when the state was saved, if there is one.
+    var thumbnailURL: URL? {
+        let url = folder.appendingPathComponent("\(index).jpg")
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
     var dateText: String { date.formatted(date: .abbreviated, time: .shortened) }
     var sizeText: String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
 }
@@ -132,6 +139,7 @@ enum SaveStateCatalog {
         } else {
             try? FileManager.default.removeItem(at: slot.url)
             try? FileManager.default.removeItem(at: slot.backupURL)
+            try? FileManager.default.removeItem(at: slot.folder.appendingPathComponent("\(slot.index).jpg"))
         }
     }
 
@@ -148,13 +156,38 @@ enum SaveStateCatalog {
 
     /// Copies a slot's file to a temporary folder as "<game> - Slot N.savestate", for the share sheet.
     static func exportCopy(of slot: SavedSlot, game title: String) throws -> URL {
-        let name = "\(title) - Slot \(slot.index + 1).savestate".replacingOccurrences(of: "/", with: "-")
+        let name = "\(title) - \(slot.title).savestate".replacingOccurrences(of: "/", with: "-")
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("SaveStateExport", isDirectory: true)
         let target = folder.appendingPathComponent(name)
         try? FileManager.default.removeItem(at: folder)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: slot.url, to: target)
         return target
+    }
+}
+
+// MARK: - Thumbnail
+
+/// The small picture saved with a save state.
+struct SlotThumbnail: View {
+    let url: URL?
+    var width: CGFloat = 64
+
+    var body: some View {
+        Group {
+            if let url, let image = UIImage(contentsOfFile: url.path) {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                Rectangle()
+                    .fill(Color.secondary.opacity(0.15))
+                    .overlay(Image(systemName: "photo").foregroundStyle(.secondary))
+            }
+        }
+        .frame(width: width, height: width * 3 / 4)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .accessibilityHidden(true)
     }
 }
 
@@ -217,6 +250,7 @@ struct SaveStateManagerView: View {
                 Section {
                     ForEach(entry.slots) { slot in
                         HStack {
+                            SlotThumbnail(url: slot.thumbnailURL)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(slot.title)
                                 Text("\(slot.dateText) · \(slot.sizeText)")

@@ -11,6 +11,9 @@
 
 #include <util/std_lib.hpp>
 
+#include <algorithm>
+#include <vector>
+
 namespace app::services {
 
 ScreenshotService::~ScreenshotService() {
@@ -38,6 +41,50 @@ void ScreenshotService::Enqueue(screenshot::Screenshot &&ss) {
     m_writeEvent.Set();
 }
 
+bool ScreenshotService::WriteThumbnail(const screenshot::Screenshot &ss) {
+    if (ss.thumbnailPath.empty() || ss.fbWidth == 0 || ss.fbHeight == 0 ||
+        ss.fb.size() < size_t(ss.fbWidth) * ss.fbHeight) {
+        return false;
+    }
+
+    // The picture as it is shown (the pixels of some modes are wider or taller than others), shrunk to fit this size
+    static constexpr uint32 kMaxWidth = 192;
+    const uint32 shownWidth = ss.fbWidth * std::max<uint32>(ss.fbScaleX, 1);
+    const uint32 shownHeight = ss.fbHeight * std::max<uint32>(ss.fbScaleY, 1);
+    const uint32 width = std::min(shownWidth, kMaxWidth);
+    const uint32 height = std::max<uint32>(1, (uint64(width) * shownHeight) / shownWidth);
+
+    // Average the source pixels that fall on every thumbnail pixel
+    std::vector<uint8> rgb(size_t(width) * height * 3);
+    for (uint32 y = 0; y < height; ++y) {
+        const uint32 y0 = (uint64(y) * ss.fbHeight) / height;
+        const uint32 y1 = std::max(y0 + 1, uint32((uint64(y + 1) * ss.fbHeight) / height));
+        for (uint32 x = 0; x < width; ++x) {
+            const uint32 x0 = (uint64(x) * ss.fbWidth) / width;
+            const uint32 x1 = std::max(x0 + 1, uint32((uint64(x + 1) * ss.fbWidth) / width));
+            uint32 r = 0, g = 0, b = 0, count = 0;
+            for (uint32 sy = y0; sy < y1 && sy < ss.fbHeight; ++sy) {
+                for (uint32 sx = x0; sx < x1 && sx < ss.fbWidth; ++sx) {
+                    const uint32 pixel = ss.fb[size_t(sy) * ss.fbWidth + sx];
+                    r += pixel & 0xFF;
+                    g += (pixel >> 8) & 0xFF;
+                    b += (pixel >> 16) & 0xFF;
+                    ++count;
+                }
+            }
+            count = std::max<uint32>(count, 1);
+            uint8 *out = &rgb[(size_t(y) * width + x) * 3];
+            out[0] = static_cast<uint8>(r / count);
+            out[1] = static_cast<uint8>(g / count);
+            out[2] = static_cast<uint8>(b / count);
+        }
+    }
+
+    std::error_code error{};
+    std::filesystem::create_directories(ss.thumbnailPath.parent_path(), error);
+    return stbi_write_jpg(fmt::format("{}", ss.thumbnailPath).c_str(), width, height, 3, rgb.data(), 80) != 0;
+}
+
 void ScreenshotService::ProcessingThread(SharedContext &context) {
     util::SetCurrentThreadName("Screenshot processing thread");
 
@@ -57,6 +104,11 @@ void ScreenshotService::ProcessingThread(SharedContext &context) {
                 }
                 std::swap(ss, m_queue.front());
                 m_queue.pop();
+            }
+
+            if (!ss.thumbnailPath.empty()) {
+                WriteThumbnail(ss);
+                continue;
             }
 
             auto localNow = util::to_local_time(ss.timestamp);

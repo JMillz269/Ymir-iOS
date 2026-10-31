@@ -119,8 +119,15 @@ final class YmirShell: NSObject {
 
     // MARK: Actions
 
+    /// The slot the app saves a state into by itself when a game is left.
+    static let autoSlotIndex = 10
+
     private static func launch(_ game: GameEntry) {
         GameLibrary.markPlayed(game)
+        if YmirHost.isDiscLoaded {
+            // (starting a game over the one that is running; it would be lost)
+            YmirHost.autoSave(completion: nil)
+        }
         YmirHost.launchGame(path: game.url.path)
         pausedByLauncher = false
         dismissLauncher()
@@ -129,6 +136,10 @@ final class YmirShell: NSObject {
     /// Starts a game and continues from one of its save states; from the library or from the in-game menu.
     static func launch(_ game: GameEntry, loadSlot slot: Int) {
         GameLibrary.markPlayed(game)
+        if YmirHost.isDiscLoaded && slot != autoSlotIndex {
+            // (what is running is kept in the autosave slot, unless that's the state about to be loaded)
+            YmirHost.autoSave(completion: nil)
+        }
         if YmirHost.isDiscLoaded, YmirHost.loadedGamePath == game.url.path {
             // Already running: the state is loaded into it
             YmirHost.loadState(slot: slot)
@@ -270,6 +281,7 @@ final class YmirShell: NSObject {
     /// Unloads the game and returns to the game library.
     static func closeGame() {
         closeMenu {
+            YmirHost.autoSave(completion: nil)
             YmirHost.quitGame()
             YmirShell.showLauncher()
         }
