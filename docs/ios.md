@@ -126,6 +126,14 @@ When the CPU reads the VDP1 framebuffer, the copy on the GPU is downloaded only 
 download: the CPU's own writes reach both copies alike, so a game that reads, writes and reads again waits for the GPU
 once.
 
+Save States (Settings) lists the save states of every game, with their date and size: Load starts the game and continues
+from the state, Export shares a copy and Delete removes it (or all of a game's states). Long-pressing a game in the
+library offers Load State with the game's slots, newest first. Save states are kept per game in
+`savestates/<disc hash>/<slot>.savestate`; the hash can't be worked out without reading the disc, so the emulator notes the
+disc image a folder belongs to in `game.txt` there (the path relative to the Ymir folder) whenever the game is started
+or a state is saved. States made before that are listed as an unknown game, by the title on the disc, until the game has
+been started once.
+
 `tools/render-tests/hr_render_test.cpp` renders a synthetic scene headlessly through the software renderer
 (`build.sh` builds it against a core build) to check the output and time frames.
 

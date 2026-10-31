@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 /// Root of the native app: a tab bar (Liquid Glass on iOS 26 and later) with the game library and the settings.
 struct LauncherRoot: View {
     let onLaunch: (GameEntry) -> Void
+    let onLaunchState: (GameEntry, Int) -> Void
     let onResume: () -> Void
 
     @StateObject private var library = GameLibrary()
@@ -12,7 +13,7 @@ struct LauncherRoot: View {
 
     var body: some View {
         TabView(selection: $selection) {
-            GamesView(library: library, onLaunch: onLaunch, onResume: onResume)
+            GamesView(library: library, onLaunch: onLaunch, onLaunchState: onLaunchState, onResume: onResume)
                 .tabItem { Label("Games", systemImage: "gamecontroller.fill") }
                 .tag(0)
 
@@ -44,6 +45,7 @@ private struct AlertInfo: Identifiable {
 struct GamesView: View {
     @ObservedObject var library: GameLibrary
     let onLaunch: (GameEntry) -> Void
+    let onLaunchState: (GameEntry, Int) -> Void
     let onResume: () -> Void
 
     @State private var search = ""
@@ -62,6 +64,7 @@ struct GamesView: View {
     @State private var editMode = EditMode.inactive
     @State private var hasBIOS = YmirHost.hasBIOS
     @State private var activePath: String? = YmirHost.loadedGamePath
+    @State private var savedStates: [SavedGame] = []
 
     private var filteredGames: [GameEntry] {
         let query = search.trimmingCharacters(in: .whitespaces)
@@ -118,6 +121,20 @@ struct GamesView: View {
                                     play(game)
                                 } label: {
                                     Label("Play", systemImage: "play.fill")
+                                }
+                                let states = SaveStateCatalog.slots(for: game, in: savedStates)
+                                if !states.isEmpty {
+                                    Menu {
+                                        ForEach(states) { slot in
+                                            Button {
+                                                play(game, loadSlot: slot.index)
+                                            } label: {
+                                                Label("\(slot.title) · \(slot.dateText)", systemImage: "clock.arrow.circlepath")
+                                            }
+                                        }
+                                    } label: {
+                                        Label("Load State", systemImage: "clock.arrow.circlepath")
+                                    }
                                 }
                                 Menu {
                                     Button {
@@ -319,9 +336,10 @@ struct GamesView: View {
         library.reload()
         hasBIOS = YmirHost.hasBIOS
         activePath = YmirHost.isDiscLoaded ? YmirHost.loadedGamePath : nil
+        savedStates = SaveStateCatalog.scan(games: library.games)
     }
 
-    private func play(_ game: GameEntry) {
+    private func play(_ game: GameEntry, loadSlot slot: Int? = nil) {
         guard hasBIOS else {
             alert = AlertInfo(
                 title: "BIOS Required",
@@ -331,7 +349,11 @@ struct GamesView: View {
             )
             return
         }
-        onLaunch(game)
+        if let slot {
+            onLaunchState(game, slot)
+        } else {
+            onLaunch(game)
+        }
     }
 
     private func startImport(_ kind: ImportKind) {

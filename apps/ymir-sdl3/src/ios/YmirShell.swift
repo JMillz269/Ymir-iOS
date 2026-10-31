@@ -83,6 +83,7 @@ final class YmirShell: NSObject {
 
         let root = LauncherRoot(
             onLaunch: { game in YmirShell.launch(game) },
+            onLaunchState: { game, slot in YmirShell.launch(game, loadSlot: slot) },
             onResume: { YmirShell.resumeFromLauncher() }
         )
         let controller = ShellHostingController(rootView: root)
@@ -123,6 +124,25 @@ final class YmirShell: NSObject {
         YmirHost.launchGame(path: game.url.path)
         pausedByLauncher = false
         dismissLauncher()
+    }
+
+    /// Starts a game and continues from one of its save states; from the library or from the in-game menu.
+    static func launch(_ game: GameEntry, loadSlot slot: Int) {
+        GameLibrary.markPlayed(game)
+        if YmirHost.isDiscLoaded, YmirHost.loadedGamePath == game.url.path {
+            // Already running: the state is loaded into it
+            YmirHost.loadState(slot: slot)
+            YmirHost.paused = false
+        } else {
+            YmirHost.launchGame(path: game.url.path, loadSlot: slot)
+        }
+        pausedByLauncher = false
+        if menuController != nil {
+            menuState.keepPaused = false
+            closeMenu()
+        } else {
+            dismissLauncher()
+        }
     }
 
     private static func resumeFromLauncher() {

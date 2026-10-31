@@ -29,6 +29,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(class, nonatomic) BOOL fastForward;
 
 + (void)launchGameAtPath:(NSString *)path NS_SWIFT_NAME(launchGame(path:));
+/// Launches a game and loads the save state of one of its slots once it is up.
++ (void)launchGameAtPath:(NSString *)path loadStateFromSlot:(NSInteger)slot NS_SWIFT_NAME(launchGame(path:loadSlot:));
 + (void)softReset NS_SWIFT_NAME(softReset());
 + (void)hardReset NS_SWIFT_NAME(hardReset());
 + (void)openCloseTray NS_SWIFT_NAME(openCloseTray());

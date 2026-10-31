@@ -121,6 +121,13 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     }
 }
 
++ (void)launchGameAtPath:(NSString *)path loadStateFromSlot:(NSInteger)slot {
+    auto &host = app::ios::GetHost();
+    if (host.launchGameAndLoadState) {
+        host.launchGameAndLoadState(std::filesystem::path{std::string{path.UTF8String}}, static_cast<int>(slot));
+    }
+}
+
 + (void)launchGameAtPath:(NSString *)path {
     auto &host = app::ios::GetHost();
     if (host.launchGame) {

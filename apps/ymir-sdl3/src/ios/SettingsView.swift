@@ -173,6 +173,11 @@ struct SettingsView: View {
             }
 
             Section {
+                NavigationLink {
+                    SaveStateManagerView()
+                } label: {
+                    Label("Save States", systemImage: "clock.arrow.circlepath")
+                }
                 Button {
                     FilesApp.openDocuments()
                 } label: {
@@ -181,7 +186,7 @@ struct SettingsView: View {
             } header: {
                 Text("Files")
             } footer: {
-                Text("Games, BIOS images, save data and screenshots live in the Ymir folder, which is visible in the Files app.")
+                Text("Save States lists and manages the save states of all games. Games, BIOS images, save data and screenshots live in the Ymir folder, which is visible in the Files app.")
             }
 
             Section("About") {

@@ -1525,6 +1525,15 @@ void App::RunEmulator() {
         m_context.emuSpeed.limitSpeed = true;
         m_context.audioSystem.SetSync(m_context.emuSpeed.ShouldSyncToAudio());
     };
+    iosHost.launchGameAndLoadState = [this](const std::filesystem::path &path, int slot) {
+        // (the events run in this order on the emulator thread: loading the disc reads the save states of the game,
+        // which the state is then taken from)
+        m_context.EnqueueEvent(events::emu::LoadDisc(path));
+        m_context.EnqueueEvent(events::emu::SetPaused(false));
+        m_context.emuSpeed.limitSpeed = true;
+        m_context.audioSystem.SetSync(m_context.emuSpeed.ShouldSyncToAudio());
+        m_saveStateService.LoadSaveStateSlot(static_cast<std::size_t>(slot));
+    };
     iosHost.setPaused = [this](bool paused) { m_context.EnqueueEvent(events::emu::SetPaused(paused)); };
     iosHost.setFastForward = [this](bool enable) {
         m_context.emuSpeed.limitSpeed = !enable;

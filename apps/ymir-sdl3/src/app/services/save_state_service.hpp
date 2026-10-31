@@ -139,6 +139,12 @@ public:
     /// @brief Writes a metadata text file next to the save states on disk.
     void WriteSaveStateMeta();
 
+    /// @brief Notes which disc image the save states of the current game belong to, in `game.txt` next to them: the
+    /// path of the image relative to the profile folder (or the full path if it's elsewhere). The save state folders
+    /// are named after a hash of the disc, which can't be worked out without loading the disc, so this is how a list of
+    /// every game's save states (the save state manager of the iOS app) tells whose they are.
+    void WriteGameLink();
+
     /// @brief Loads saved debugger breakpoints and watchpoints from disk.
     void LoadDebuggerState();
 

@@ -32,6 +32,7 @@ struct HostInterface {
 
     // -- Actions --
     std::function<void(const std::filesystem::path &)> launchGame;
+    std::function<void(const std::filesystem::path &, int)> launchGameAndLoadState; // path, slot of that game's states
     std::function<void(bool)> setPaused;
     std::function<void(bool)> setFastForward;
     std::function<void()> softReset;
