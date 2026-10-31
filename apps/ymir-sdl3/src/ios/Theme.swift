@@ -371,7 +371,7 @@ extension Color {
         if text.hasPrefix("#") {
             text.removeFirst()
         }
-        let value = Scanner(string: text).scanHexInt64() ?? 0
+        let value = UInt64(text, radix: 16) ?? 0
         self.init(
             red: Double((value >> 16) & 0xFF) / 255.0,
             green: Double((value >> 8) & 0xFF) / 255.0,
