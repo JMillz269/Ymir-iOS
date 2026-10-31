@@ -349,7 +349,9 @@ struct EmuGpu final : metal::Gpu {
     }
     void Vdp1DownloadFBRAM(void *dst, uint32 size) override {
         std::memcpy(dst, fbram.data(), size);
+        ++downloads;
     }
+    uint32 downloads = 0;
 
     uint32 FbLoad(uint32 address) const {
         uint32 v;
@@ -1935,6 +1937,40 @@ int main(int argc, char **argv) {
                     miny = std::min(miny, y);
                     maxy = std::max(maxy, y);
                 }
+            }
+        }
+        {
+            // The CPU reads the framebuffer, writes to it and reads it again: the copy it reads must match the
+            // software renderer's both times, and the second read needs no download (the CPU copy has its writes)
+            auto readbackDiffs = [&] {
+                uint32 n = 0;
+                for (uint32 y = 0; y < 224; ++y) {
+                    for (uint32 x = 0; x < 320; ++x) {
+                        const size_t o = (size_t(y) * 512 + x) * 2;
+                        n += std::memcmp(&stateGPU->mem1.FBRAM[fbi][o], &stateSW->mem1.FBRAM[fbi][o], 2) != 0;
+                        n += std::memcmp(&gpu.fbram[fbi * 256 * 1024 + o], &stateSW->mem1.FBRAM[fbi][o], 2) != 0;
+                    }
+                }
+                return n;
+            };
+            vdp1.SyncFB();
+            const uint32 before = readbackDiffs();
+            const uint32 downloadsBefore = gpu.downloads;
+            for (uint32 i = 0; i < 16; ++i) {
+                const uint32 addr = ((150 + i) * 512 + 40 + i * 3) * 2;
+                const uint16 v = uint16(0x8000 | (i * 0x0421));
+                util::WriteBE<uint16>(&stateSW->mem1.FBRAM[fbi][addr], v);
+                util::WriteBE<uint16>(&stateGPU->mem1.FBRAM[fbi][addr], v);
+                sw.VDP1WriteFB(addr, v);
+                vdp1.WriteFB(addr, 2);
+            }
+            vdp1.SyncFB();
+            const uint32 after = readbackDiffs();
+            const uint32 extra = gpu.downloads - downloadsBefore;
+            std::printf("  CPU readback: %u differences, %u after CPU writes (%u downloads again)\n", before, after,
+                        extra);
+            if (before || after || (extra && !std::getenv("SKIPNATIVE"))) {
+                ++badFrames;
             }
         }
         uint32 filled = 0;

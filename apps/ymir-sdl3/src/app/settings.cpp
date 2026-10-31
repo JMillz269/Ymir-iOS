@@ -1021,6 +1021,7 @@ void Settings::ResetToDefaults() {
     general.preloadDiscImagesToRAM = false;
     general.rememberLastLoadedDisc = false;
     general.boostEmuThreadPriority = true;
+    general.performanceLog = false;
     general.boostProcessPriority = true;
     general.screenshotScale = 2;
 
@@ -1130,6 +1131,7 @@ void Settings::ResetToDefaults() {
     video.useFullRefreshRateWithVideoSync = false;
     video.reduceLatency = true;
     video.metalFXMode = 0;
+    video.frameDelay = 0;
     video.framePacing = 1; // Match Display: steadiest on iPhone (a frame held over about every 5 s instead of about every second)
     video.forceStretch = false;
     video.portraitStretchHeight = 0.0f;
@@ -1248,6 +1250,7 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblGeneral, "PreloadDiscImagesToRAM", general.preloadDiscImagesToRAM);
         Parse(tblGeneral, "RememberLastLoadedDisc", general.rememberLastLoadedDisc);
         Parse(tblGeneral, "BoostEmuThreadPriority", general.boostEmuThreadPriority);
+        Parse(tblGeneral, "PerformanceLog", general.performanceLog);
         Parse(tblGeneral, "BoostProcessPriority", general.boostProcessPriority);
         Parse(tblGeneral, "EnableRewindBuffer", general.enableRewindBuffer);
         Parse(tblGeneral, "ScreenshotScale", general.screenshotScale);
@@ -1651,6 +1654,8 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         video.portraitStretchHeight = std::clamp(video.portraitStretchHeight, 0.0f, 1.0f);
         Parse(tblVideo, "MetalFXMode", video.metalFXMode);
         Parse(tblVideo, "FramePacing", video.framePacing);
+        Parse(tblVideo, "FrameDelay", video.frameDelay);
+        video.frameDelay = std::clamp(video.frameDelay, 0, 1);
         video.framePacing = std::clamp(video.framePacing, 0, 1);
         video.metalFXMode = std::clamp(video.metalFXMode, 0, 2);
         Parse(tblVideo, "Sharpness", video.sharpness);
@@ -1922,6 +1927,7 @@ SettingsSaveResult Settings::Save() {
             {"PreloadDiscImagesToRAM", general.preloadDiscImagesToRAM},
             {"RememberLastLoadedDisc", general.rememberLastLoadedDisc},
             {"BoostEmuThreadPriority", general.boostEmuThreadPriority},
+            {"PerformanceLog", general.performanceLog},
             {"BoostProcessPriority", general.boostProcessPriority},
             {"EnableRewindBuffer", general.enableRewindBuffer},
             {"ScreenshotScale", general.screenshotScale},
@@ -2104,6 +2110,7 @@ SettingsSaveResult Settings::Save() {
             {"PortraitStretchHeight", video.portraitStretchHeight},
             {"MetalFXMode", video.metalFXMode},
             {"FramePacing", video.framePacing},
+            {"FrameDelay", video.frameDelay},
             {"Sharpness", video.sharpness},
             {"Scanlines", video.scanlines},
             {"MaskStrength", video.maskStrength},

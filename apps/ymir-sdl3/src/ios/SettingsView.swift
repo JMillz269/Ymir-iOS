@@ -330,12 +330,17 @@ struct DisplaySettingsView: View {
                     Text("Match Display").tag(1)
                 }
                 .disabled(!store.bool("video.sync", default: true).wrappedValue)
+                Picker("Frame Delay", selection: store.int("video.frameDelay")) {
+                    Text("Off").tag(0)
+                    Text("Auto").tag(1)
+                }
+                .disabled(!store.bool("video.sync", default: true).wrappedValue)
                 Toggle("Use Full Refresh Rate", isOn: store.bool("video.fullRefreshRate"))
                 Toggle("Reduce Latency", isOn: store.bool("video.reduceLatency"))
             } header: {
                 Text("Synchronization")
             } footer: {
-                Text("Video sync paces emulation to the display. Frame Pacing picks how: Exact Speed runs the game at the Saturn's own rate (59.83 frames per second), so about every 6 seconds one frame stays on the screen twice as long. Match Display shows exactly one game frame per display refresh for the smoothest motion; the game and its sound then run 0.3% faster, which you can't hear. Use Full Refresh Rate does nothing with Match Display. Reduce Latency helps on displays with a low refresh rate.")
+                Text("Video sync paces emulation to the display. Frame Pacing picks how: Exact Speed runs the game at the Saturn's own rate (59.83 frames per second), so about every 6 seconds one frame stays on the screen twice as long. Match Display shows exactly one game frame per display refresh for the smoothest motion; the game and its sound then run 0.3% faster, which you can't hear. Frame Delay lowers input lag: Auto starts emulating each frame as late as the spare time allows (the phone usually finishes a frame in a third of the time it has), so the game reads your controls closer to when the picture is shown, up to 12 ms later. It backs off by itself in heavy scenes; turn it off if you see stutter. Use Full Refresh Rate does nothing with Match Display. Reduce Latency helps on displays with a low refresh rate.")
             }
         }
         .navigationTitle("Display")
@@ -721,6 +726,14 @@ struct PerformanceSettingsView: View {
                 Toggle("Boost Emulator Thread Priority", isOn: store.bool("general.boostEmuThread"))
             } footer: {
                 Text("May reduce stuttering, at the cost of more battery use.")
+            }
+
+            Section {
+                Toggle("Performance Log", isOn: store.bool("general.performanceLog"))
+            } header: {
+                Text("Diagnostics")
+            } footer: {
+                Text("Measures every frame in detail (frame times, CPU time per thread, GPU time, when frames reach the screen) and writes it to metal-vdp-log.txt in the app's Documents folder every 5 seconds. Leave it off for normal play: measuring costs a little time and battery. Turn it on when sending logs.")
             }
         }
         .navigationTitle("Performance")

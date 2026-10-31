@@ -8,6 +8,7 @@
 #include <ymir/util/string.hpp>
 
 #include <ymir/hw/vdp/renderer/vdp_renderer_hw_metal.hpp>
+#include <ymir/util/perf_counters.hpp>
 
 #include <backends/imgui_impl_metal.h>
 #include <backends/imgui_impl_sdl3.h>
@@ -1050,45 +1051,51 @@ struct MetalGraphicsContext::Impl {
             if (currentDrawable != nil && cmdListFrame != nil) {
                 double expected = 0.0;
                 const double minDuration = frameRateHint > 0.0 ? MinimumFrameDuration(&expected) : 0.0;
-                {
-                    std::lock_guard lock{presentStats->mutex};
-                    presentStats->expectedInterval = expected;
-                }
-                std::shared_ptr<PresentStats> stats = presentStats;
-                [currentDrawable addPresentedHandler:^(id<MTLDrawable> drawable) {
-                  const double shown = drawable.presentedTime;
-                  bool log = false;
-                  PresentStats &st = *stats;
-                  {
-                      std::lock_guard lock{st.mutex};
-                      if (shown <= 0.0) {
-                          ++st.skipped; // replaced by a newer frame before it could be shown
-                      } else {
-                          if (st.lastShownTime > 0.0 && st.expectedInterval > 0.0) {
-                              const double interval = shown - st.lastShownTime;
-                              ++st.frames;
-                              st.intervalSum += interval;
-                              st.worstInterval = std::max(st.worstInterval, interval);
-                              if (interval > st.expectedInterval * 1.4) {
-                                  ++st.held; // the previous frame stayed on the screen longer than meant
-                              } else if (interval < st.expectedInterval * 0.6) {
-                                  ++st.early;
+                if (ymir::perf::detailedLog.load(std::memory_order_relaxed)) {
+                    {
+                        std::lock_guard lock{presentStats->mutex};
+                        presentStats->expectedInterval = expected;
+                    }
+                    std::shared_ptr<PresentStats> stats = presentStats;
+                    [currentDrawable addPresentedHandler:^(id<MTLDrawable> drawable) {
+                      const double shown = drawable.presentedTime;
+                      bool log = false;
+                      PresentStats &st = *stats;
+                      {
+                          std::lock_guard lock{st.mutex};
+                          if (shown <= 0.0) {
+                              ++st.skipped; // replaced by a newer frame before it could be shown
+                          } else {
+                              if (st.lastShownTime > 0.0 && st.expectedInterval > 0.0) {
+                                  const double interval = shown - st.lastShownTime;
+                                  ++st.frames;
+                                  st.intervalSum += interval;
+                                  st.worstInterval = std::max(st.worstInterval, interval);
+                                  if (interval > st.expectedInterval * 1.4) {
+                                      ++st.held; // the previous frame stayed on the screen longer than meant
+                                  } else if (interval < st.expectedInterval * 0.6) {
+                                      ++st.early;
+                                  }
+                                  log = st.frames >= 600;
                               }
-                              log = st.frames >= 600;
+                              st.lastShownTime = shown;
                           }
-                          st.lastShownTime = shown;
+                          if (log) {
+                              ymir::vdp::metal::LogMessage(
+                                  "display: last %u frames on the screen every %.2f ms on average (meant %.2f ms), worst "
+                                  "%.2f ms; %u stayed up longer than meant, %u were replaced early, %u were never shown",
+                                  st.frames, st.intervalSum / st.frames * 1000.0, st.expectedInterval * 1000.0,
+                                  st.worstInterval * 1000.0, st.held, st.early, st.skipped);
+                              st.frames = st.held = st.early = st.skipped = 0;
+                              st.intervalSum = st.worstInterval = 0.0;
+                          }
                       }
-                      if (log) {
-                          ymir::vdp::metal::LogMessage(
-                              "display: last %u frames on the screen every %.2f ms on average (meant %.2f ms), worst "
-                              "%.2f ms; %u stayed up longer than meant, %u were replaced early, %u were never shown",
-                              st.frames, st.intervalSum / st.frames * 1000.0, st.expectedInterval * 1000.0,
-                              st.worstInterval * 1000.0, st.held, st.early, st.skipped);
-                          st.frames = st.held = st.early = st.skipped = 0;
-                          st.intervalSum = st.worstInterval = 0.0;
-                      }
-                  }
-                }];
+                    }];
+                } else {
+                    // (measuring starts over when the performance log is turned on again)
+                    std::lock_guard lock{presentStats->mutex};
+                    presentStats->lastShownTime = 0.0;
+                }
                 if (frameRateHint > 0.0) {
                     // Lets a variable refresh rate (ProMotion) display settle at the rate frames are produced at
                     // instead of running at its maximum rate

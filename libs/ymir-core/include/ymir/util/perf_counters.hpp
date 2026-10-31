@@ -21,6 +21,11 @@ inline std::atomic<uint64> vdp2Ns{0};  // VDP2 line rendering (render thread if 
 inline std::atomic<uint64> frames{0};  // frames completed
 inline std::atomic<uint64> emuWaitNs{0}; // emulator waiting for the display to ask for the next frame (video sync)
 inline std::atomic<uint64> guiWaitNs{0}; // display waiting for the emulator to finish a frame (video sync)
+inline std::atomic<uint64> frameDelayNs{0}; // emulator holding back the start of a frame to read input later (frame delay)
+
+// Whether the Metal renderer and the display measure every frame in detail and write it to their log (the performance
+// log). Off by default: the measurements cost a little time on every frame. The counters above are always kept.
+inline std::atomic<bool> detailedLog{false};
 
 using Clock = std::chrono::steady_clock;
 

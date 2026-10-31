@@ -35,7 +35,8 @@ StructuredBuffer<RotParamBase> g_rotParamBases : register(t10);
 ByteAddressBuffer g_spriteFB : register(t11);       // the scaled up framebuffers
 ByteAddressBuffer g_spriteFBNative : register(t12); // the native framebuffers, for telling which pixels changed
 Texture2D<float4> g_compositeNative : register(t13); // the native image
-// Counts (for the log): every 64th sub-pixel that was looked at, and how many of those differ
+// Counts (for the log): every 64th sub-pixel that was looked at, and how many of those differ; the third word turns the
+// counting on (only while the performance log is on)
 RWByteAddressBuffer g_hrStats : register(u2);
 
 #define SPRITE_FUSED 1
@@ -653,6 +654,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 spriteOutCoord = uint2(drawCoord.x, sprite::GetY(drawCoord.y));
     float4 nativeColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
     bool nativeRead = false;
+    const bool countStats = g_hrStats.Load(8) != 0u;
     uint cacheLayer0 = 0, cacheMesh0 = 0, cacheAttrs0 = 0xFFFFFFFF, cacheColor0 = 0;
     uint cacheLayer1 = 0, cacheMesh1 = 0, cacheAttrs1 = 0xFFFFFFFF, cacheColor1 = 0;
     uint cacheLayer2 = 0, cacheMesh2 = 0, cacheAttrs2 = 0xFFFFFFFF, cacheColor2 = 0;
@@ -666,7 +668,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
         sprite::g_hrSubY = subPos.y;
         const bool differs = sprite::HRPixelDiffers(drawCoord);
         const uint2 hrDrawPos = drawCoord * hrScale + subPos;
-        if (((hrDrawPos.x | hrDrawPos.y) & 7u) == 0u) {
+        if (countStats && ((hrDrawPos.x | hrDrawPos.y) & 7u) == 0u) {
             uint dummy;
             g_hrStats.InterlockedAdd(differs ? 4 : 0, 1, dummy);
         }

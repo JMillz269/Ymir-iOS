@@ -160,6 +160,8 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
             [cfg](bool v) { cfg->video.useFullRefreshRateWithVideoSync = v; });
     addInt("video.framePacing", [cfg] { return cfg->video.framePacing; },
            [cfg](int v) { cfg->video.framePacing = std::clamp(v, 0, 1); });
+    addInt("video.frameDelay", [cfg] { return cfg->video.frameDelay; },
+           [cfg](int v) { cfg->video.frameDelay = std::clamp(v, 0, 1); });
     addBool("video.reduceLatency", [cfg] { return cfg->video.reduceLatency; },
             [cfg](bool v) { cfg->video.reduceLatency = v; });
 
@@ -277,6 +279,8 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
                 cfg->general.boostEmuThreadPriority = v;
                 ctx->EnqueueEvent(events::emu::SetThreadPriority(v));
             });
+    addBool("general.performanceLog", [cfg] { return cfg->general.performanceLog; },
+            [cfg](bool v) { cfg->general.performanceLog = v; });
     addBool("general.rewind", [cfg] { return cfg->general.enableRewindBuffer; },
             [cfg, ctx](bool v) {
                 cfg->general.enableRewindBuffer = v;

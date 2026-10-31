@@ -144,6 +144,8 @@ struct Settings {
         bool rememberLastLoadedDisc;
 
         bool boostEmuThreadPriority;
+        // Measure every frame in detail and write it to the log (metal-vdp-log.txt on iOS); costs a little time
+        bool performanceLog;
         bool boostProcessPriority;
 
         int screenshotScale;
@@ -485,6 +487,8 @@ struct Settings {
         // How video sync paces frames: 0 = run at the Saturn's exact speed on a timer, 1 = lock to the display's refresh
         // (one game frame per display frame; emulation and sound run that much faster, e.g. 0.3% for 59.83 Hz on 60 Hz)
         int framePacing;
+        // 0 = off, 1 = automatic: start emulating each frame as late as the spare time allows, to cut input lag
+        int frameDelay;
 
         int metalFXMode; // 0=off, 1=spatial, 2=temporal (see gfx::UpscaleMode); iOS only
 

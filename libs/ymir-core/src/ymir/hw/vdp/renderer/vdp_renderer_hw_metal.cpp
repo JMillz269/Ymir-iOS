@@ -1178,7 +1178,7 @@ struct MetalVDPRenderer::Impl {
 
         ++statFrames;
         statHrFrames += hrFrame ? 1 : 0;
-        if (statFrames % 300 == 0) {
+        if (statFrames % 300 == 0 && ymir::perf::detailedLog.load(std::memory_order_relaxed)) {
             MetalVDP1::Stats stats{};
             if (vdp1) {
                 stats = vdp1->TakeStats();

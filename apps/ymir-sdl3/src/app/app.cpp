@@ -569,6 +569,29 @@ int App::Run(const CommandLineOptions &options) {
     return 0;
 }
 
+void App::UpdateFrameDelay(double spareMs) {
+    auto &screen = m_context.screen;
+    if (m_settings.video.frameDelay == 0 || m_context.paused || m_context.emuSpeed.GetCurrentSpeedFactor() != 1.0) {
+        screen.frameDelayMs.store(0.0, std::memory_order_relaxed);
+        return;
+    }
+    // Keep about this much of the frame spare: the GPU still has to finish the picture after the emulator is done with
+    // it, and some frames take longer to emulate than others
+    static constexpr double kTargetSpareMs = 6.0;
+    static constexpr double kMaxDelayMs = 12.0;
+    double delay = screen.frameDelayMs.load(std::memory_order_relaxed);
+    if (spareMs < 1.0) {
+        // The display nearly had to wait for this frame: back off a lot
+        delay -= 4.0;
+    } else if (spareMs < kTargetSpareMs) {
+        delay -= (kTargetSpareMs - spareMs) * 0.5;
+    } else {
+        // Creep up slowly (3 ms a second at most), so that a run of light frames doesn't leave no room for a heavy one
+        delay += std::min(0.05, (spareMs - kTargetSpareMs) * 0.1);
+    }
+    screen.frameDelayMs.store(std::clamp(delay, 0.0, kMaxDelayMs), std::memory_order_relaxed);
+}
+
 void App::RunEmulator() {
     using namespace std::chrono_literals;
     using namespace ymir;
@@ -1189,8 +1212,10 @@ void App::RunEmulator() {
                 if (sharedCtx.emuSpeed.limitSpeed && screen.videoSync) {
                     const auto perfWaitStart = ymir::perf::Clock::now();
                     screen.frameRequestEvent.Wait();
-                    ymir::perf::emuWaitNs.fetch_add(ymir::perf::NanosecondsSince(perfWaitStart), std::memory_order_relaxed);
+                    const uint64 waitNs = ymir::perf::NanosecondsSince(perfWaitStart);
+                    ymir::perf::emuWaitNs.fetch_add(waitNs, std::memory_order_relaxed);
                     screen.frameRequestEvent.Reset();
+                    app.UpdateFrameDelay(waitNs / 1.0e6);
                 }
                 if (settings.video.reduceLatency || !screen.updated || screen.videoSync) {
                     std::unique_lock lock{screen.mtxFramebuffer};
@@ -1561,6 +1586,9 @@ void App::RunEmulator() {
         bool forceScreenScale = false;
         int forcedScreenScale = 1;
 
+        // (the renderer and the display measure frames in detail only while the performance log is on)
+        ymir::perf::detailedLog.store(settings.general.performanceLog, std::memory_order_relaxed);
+
         // Configure video sync
         const bool fullScreen = settings.video.fullScreen;
         const bool videoSync =
@@ -1731,6 +1759,7 @@ void App::RunEmulator() {
                 }
             }
             if (++screen.dupGUIFrameCounter >= screen.dupGUIFrames) {
+                screen.frameRequestTime.store(clk::now().time_since_epoch().count(), std::memory_order_relaxed);
                 screen.frameRequestEvent.Set();
                 screen.dupGUIFrameCounter = 0;
                 screen.expectFrame = true;
@@ -4005,6 +4034,21 @@ void App::EmulatorThread() {
             if (m_context.emuSpeed.limitSpeed && m_context.screen.videoSync) {
                 m_emuProcessEvent.Wait();
                 m_emuProcessEvent.Reset();
+
+                // Frame delay: start the frame later, so that it reads the controls closer to when it's shown
+                auto &screen = m_context.screen;
+                const double frameDelayMs = screen.frameDelayMs.load(std::memory_order_relaxed);
+                if (frameDelayMs > 0.0 && !m_context.paused) {
+                    const auto requested = clk::time_point{clk::duration{screen.frameRequestTime.load(std::memory_order_relaxed)}};
+                    const auto start = requested + std::chrono::duration_cast<clk::duration>(
+                                                       std::chrono::duration<double, std::milli>(frameDelayMs));
+                    const auto now = clk::now();
+                    // (never hold back for longer than the delay itself, in case the request time is old)
+                    if (now < start && start - now <= std::chrono::milliseconds(20)) {
+                        std::this_thread::sleep_until(start);
+                        ymir::perf::frameDelayNs.fetch_add(ymir::perf::NanosecondsSince(now), std::memory_order_relaxed);
+                    }
+                }
             }
 
             const bool rewindEnabled = m_context.rewindBuffer.IsRunning();

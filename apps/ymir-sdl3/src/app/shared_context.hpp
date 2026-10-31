@@ -330,6 +330,12 @@ struct SharedContext {
         std::chrono::steady_clock::time_point nextEmuFrameTarget{}; // target time for next frame in emu thread
         std::chrono::steady_clock::duration frameInterval{};        // interval between frames
 
+        // Frame delay: the emulator starts each frame this much after the display asked for the previous one, so that
+        // the frame reads the controls as late as possible. Worked out by the emulator thread from how long it was left
+        // waiting for the display (the spare time) on the frames before.
+        std::atomic<std::chrono::steady_clock::rep> frameRequestTime{0}; // when the display last asked for a frame
+        std::atomic<double> frameDelayMs{0.0}; // (set where frames are finished, read by the emulator thread)
+
         // Duplicate frames in fullscreen mode to maintain high GUI frame rate when running at low speeds
         uint64 dupGUIFrames = 0;
         uint64 dupGUIFrameCounter = 0;

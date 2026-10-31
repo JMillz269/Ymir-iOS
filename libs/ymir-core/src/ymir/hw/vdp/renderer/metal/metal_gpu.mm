@@ -895,9 +895,8 @@ public:
 
     void Vdp1DownloadFBRAM(void *dst, uint32 size) override {
         size = std::min<uint32>(size, kVDP1FBRAMSize * 2);
-        if (++m_logDownloads <= 30 || m_logDownloads % 200 == 0) {
-            LogMessage("FBRAM download #%u", m_logDownloads);
-        }
+        const auto start = std::chrono::steady_clock::now();
+        ++m_logDownloads;
         EnsureFrame();
         EndEncoder();
         id<MTLBlitCommandEncoder> blit = [m_cmdBuf blitCommandEncoder];
@@ -907,6 +906,10 @@ public:
         // Submit what has been recorded so far and wait for it
         DrainArena();
         std::memcpy(dst, [m_fbramReadback contents], size);
+        if (ymir::perf::detailedLog.load(std::memory_order_relaxed) && (m_logDownloads <= 30 || m_logDownloads % 200 == 0)) {
+            LogMessage("FBRAM download #%u: the emulation waited %.2f ms for the GPU", m_logDownloads,
+                       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
+        }
     }
 
     void RenderLayers(const LayerPassParams &params) override {
@@ -1060,7 +1063,19 @@ public:
     }
 
     FinishedFrame FinishFrame(uint32 width, uint32 height, uint32 scale) override {
-        SampleFrameTimes();
+        const bool detailedLog = ymir::perf::detailedLog.load(std::memory_order_relaxed);
+        if (detailedLog) {
+            SampleFrameTimes();
+        } else {
+            // (measuring starts over when the log is turned on again)
+            m_frameTimesStarted = false;
+            m_frameTimes = {};
+            m_threadTotalsMs.clear();
+            m_logFrames = 0;
+        }
+        if (m_hrStatsBuf != nil) {
+            static_cast<uint32 *>([m_hrStatsBuf contents])[2] = detailedLog ? 1u : 0u;
+        }
         EnsureFrame();
         FrameSlot &slot = m_slots[m_currentSlot];
 
@@ -1076,7 +1091,7 @@ public:
         } else {
             scale = 1;
         }
-        if (m_logFrames > 0 && (m_logFrames + 1) % 300 == 0) {
+        if (detailedLog && m_logFrames > 0 && (m_logFrames + 1) % 300 == 0) {
             const uint64_t micros = m_gpuMicros.exchange(0);
             const uint64_t maxMicros = m_gpuMaxMicros.exchange(0);
             LogMessage("last 300 frames: gpu time average %.2f ms, worst %.2f ms; the emulation waited for the gpu %.2f ms "
@@ -1107,7 +1122,7 @@ public:
                 LogMessage("%s", text);
             }
         }
-        if (++m_logFrames <= 10 || m_logFrames % 300 == 0) {
+        if (detailedLog && (++m_logFrames <= 10 || m_logFrames % 300 == 0)) {
             LogMessage("frame %u (%ux%u), draws so far %u (copy %u, shadow %u, half-transparent %u, msb %u), downloads %u",
                        m_logFrames, width, height, m_logDraws, m_logDrawsByMode[0], m_logDrawsByMode[1],
                        m_logDrawsByMode[2], m_logDrawsByMode[3], m_logDownloads);
@@ -1321,6 +1336,7 @@ private:
     double m_lastProcessCpuMs = 0.0;
     // The frontend's wait counters when the frame times were last logged (they only ever grow)
     uint64_t m_lastEmuWaitNs = 0;
+    uint64_t m_lastFrameDelayNs = 0;
     // The CPU time of each thread of the app when the frame times were last logged (by thread ID)
     std::unordered_map<uint64_t, double> m_threadTotalsMs;
     uint64_t m_lastGuiWaitNs = 0;
@@ -1569,10 +1585,12 @@ private:
         const uint64_t emuWait = ymir::perf::emuWaitNs.load(std::memory_order_relaxed);
         const uint64_t guiWait = ymir::perf::guiWaitNs.load(std::memory_order_relaxed);
         const uint64_t sh2 = ymir::perf::sh2Ns.load(std::memory_order_relaxed);
+        const uint64_t frameDelay = ymir::perf::frameDelayNs.load(std::memory_order_relaxed);
         LogMessage("last %u frames, per frame: emulator waited for the display %.2f ms, display waited for the emulator "
-                   "%.2f ms, SH-2s and SCU %.2f ms",
+                   "%.2f ms, frame delay %.2f ms, SH-2s and SCU %.2f ms",
                    t.frames, (emuWait - m_lastEmuWaitNs) / n / 1.0e6, (guiWait - m_lastGuiWaitNs) / n / 1.0e6,
-                   (sh2 - m_lastSH2Ns) / n / 1.0e6);
+                   (frameDelay - m_lastFrameDelayNs) / n / 1.0e6, (sh2 - m_lastSH2Ns) / n / 1.0e6);
+        m_lastFrameDelayNs = frameDelay;
         m_lastEmuWaitNs = emuWait;
         m_lastGuiWaitNs = guiWait;
         m_lastSH2Ns = sh2;

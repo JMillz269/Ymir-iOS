@@ -831,7 +831,9 @@ private:
             m_stats.hrWriteEntries += pass.count;
         }
 
-        fbramGpuDirty = true;
+        // (the native framebuffers on the GPU now have the same bytes the CPU copy got, so the CPU copy is not made out
+        // of date by these writes: a game that reads the framebuffer, writes to it and reads it again doesn't need it
+        // downloaded again. Draws, erases and rebuilding it from the scaled up one do make it out of date.)
         cpuFBRAMWritesList.clear();
     }
 
@@ -959,7 +961,7 @@ private:
             gpu.Vdp1ClearFBRAM(true, hrFBSize * (2 + fbIndex), hrFBSize);
         }
         m_meshInUse[fbIndex] = true;
-        fbramGpuDirty = true;
+        // (the mesh framebuffers are not part of what the CPU can read, so the CPU copy is still up to date)
     }
 
     /// @brief Draws the batches of spans.

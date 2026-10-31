@@ -112,6 +112,20 @@ whole refreshes of the display, minus half a refresh, so a ProMotion display nev
 Every 600 frames the log also notes when frames actually reached the screen (`display: ...`): how many stayed up longer
 than meant or were never shown.
 
+Frame Delay (Auto) starts emulating each frame later than the display asks for the previous one, so that the game reads
+the controls closer to when the frame is shown. The emulator thread measures how long each finished frame waits for the
+display (its spare time) and moves the start so that about 6 ms are left for the GPU to finish the picture and for
+heavier frames: it backs off by 4 ms at once when a frame nearly misses and creeps up by at most 3 ms a second, up to
+12 ms.
+
+The detailed measurements (frame and CPU times, time per thread, GPU time, the scaled up image counts, when frames reach
+the screen, FBRAM downloads) are only taken and written to `metal-vdp-log.txt` while Performance Log (Performance
+settings) is on. Creating and releasing renderers and other events are always written.
+
+When the CPU reads the VDP1 framebuffer, the copy on the GPU is downloaded only if something drew into it since the last
+download: the CPU's own writes reach both copies alike, so a game that reads, writes and reads again waits for the GPU
+once.
+
 `tools/render-tests/hr_render_test.cpp` renders a synthetic scene headlessly through the software renderer
 (`build.sh` builds it against a core build) to check the output and time frames.
 
