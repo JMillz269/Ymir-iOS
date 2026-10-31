@@ -65,6 +65,7 @@ struct GamesView: View {
     @State private var hasBIOS = YmirHost.hasBIOS
     @State private var activePath: String? = YmirHost.loadedGamePath
     @State private var savedStates: [SavedGame] = []
+    @AppStorage("library.useGrid") private var useGrid = true
 
     private var filteredGames: [GameEntry] {
         let query = search.trimmingCharacters(in: .whitespaces)
@@ -84,6 +85,10 @@ struct GamesView: View {
 
     var body: some View {
         NavigationStack {
+            Group {
+            if useGrid && !library.games.isEmpty {
+                gridContent
+            } else {
             List {
                 if !hasBIOS {
                     Section {
@@ -116,72 +121,16 @@ struct GamesView: View {
                                     Label("Delete", systemImage: "trash")
                                 }
                             }
-                            .contextMenu {
-                                Button {
-                                    play(game)
-                                } label: {
-                                    Label("Play", systemImage: "play.fill")
-                                }
-                                let states = SaveStateCatalog.slots(for: game, in: savedStates)
-                                if !states.isEmpty {
-                                    Menu {
-                                        ForEach(states) { slot in
-                                            Button {
-                                                play(game, loadSlot: slot.index)
-                                            } label: {
-                                                Label("\(slot.title) · \(slot.dateText)", systemImage: "clock.arrow.circlepath")
-                                            }
-                                        }
-                                    } label: {
-                                        Label("Load State", systemImage: "clock.arrow.circlepath")
-                                    }
-                                }
-                                Menu {
-                                    Button {
-                                        artworkTarget = game
-                                        showPhotoPicker = true
-                                    } label: {
-                                        Label("Photos", systemImage: "photo.on.rectangle")
-                                    }
-                                    Button {
-                                        artworkTarget = game
-                                        showArtworkFiles = true
-                                    } label: {
-                                        Label("Files", systemImage: "folder")
-                                    }
-                                    Button {
-                                        searchTarget = game
-                                    } label: {
-                                        Label("Search", systemImage: "magnifyingglass")
-                                    }
-                                    if library.hasCustomArtwork(game) {
-                                        Button(role: .destructive) {
-                                            library.removeArtwork(for: game)
-                                        } label: {
-                                            Label("Remove Artwork", systemImage: "trash")
-                                        }
-                                    }
-                                } label: {
-                                    Label("Set Artwork", systemImage: "photo")
-                                }
-                                Button {
-                                    renameText = game.title
-                                    renameTarget = game
-                                } label: {
-                                    Label("Rename", systemImage: "pencil")
-                                }
-                                Button(role: .destructive) {
-                                    pendingDelete = game
-                                } label: {
-                                    Label("Delete", systemImage: "trash")
-                                }
-                            }
+                            .contextMenu { gameMenu(game) }
                         }
                         .onMove(perform: canReorder ? { source, destination in
                             library.moveGames(from: source, to: destination)
                         } : nil)
                     }
                 }
+            }
+            }
+            }
             }
             .environment(\.editMode, $editMode)
             .onChange(of: canReorder) { value in
@@ -252,7 +201,14 @@ struct GamesView: View {
                         Image(systemName: "arrow.up.arrow.down")
                     }
                 }
-                if canReorder {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        withAnimation { useGrid.toggle() }
+                    } label: {
+                        Image(systemName: useGrid ? "list.bullet" : "square.grid.2x2")
+                    }
+                }
+                if canReorder && !useGrid {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Button(editMode.isEditing ? "Done" : "Reorder") {
                             withAnimation {
@@ -330,6 +286,103 @@ struct GamesView: View {
             Text("The disc image is removed from this device.")
         }
         .onAppear { refresh() }
+    }
+
+    @ViewBuilder
+    private func gameMenu(_ game: GameEntry) -> some View {
+        Button {
+            play(game)
+        } label: {
+            Label("Play", systemImage: "play.fill")
+        }
+        let states = SaveStateCatalog.slots(for: game, in: savedStates)
+        if !states.isEmpty {
+            Menu {
+                ForEach(states) { slot in
+                    Button {
+                        play(game, loadSlot: slot.index)
+                    } label: {
+                        Label("\(slot.title) · \(slot.dateText)", systemImage: "clock.arrow.circlepath")
+                    }
+                }
+            } label: {
+                Label("Load State", systemImage: "clock.arrow.circlepath")
+            }
+        }
+        Menu {
+            Button {
+                artworkTarget = game
+                showPhotoPicker = true
+            } label: {
+                Label("Photos", systemImage: "photo.on.rectangle")
+            }
+            Button {
+                artworkTarget = game
+                showArtworkFiles = true
+            } label: {
+                Label("Files", systemImage: "folder")
+            }
+            Button {
+                searchTarget = game
+            } label: {
+                Label("Search", systemImage: "magnifyingglass")
+            }
+            if library.hasCustomArtwork(game) {
+                Button(role: .destructive) {
+                    library.removeArtwork(for: game)
+                } label: {
+                    Label("Remove Artwork", systemImage: "trash")
+                }
+            }
+        } label: {
+            Label("Set Artwork", systemImage: "photo")
+        }
+        Button {
+            renameText = game.title
+            renameTarget = game
+        } label: {
+            Label("Rename", systemImage: "pencil")
+        }
+        Button(role: .destructive) {
+            pendingDelete = game
+        } label: {
+            Label("Delete", systemImage: "trash")
+        }
+    }
+
+    private var gridContent: some View {
+        GeometryReader { geo in
+            let columns = max(2, Int(geo.size.width / 180))
+            let spacing: CGFloat = 16
+            let side = (geo.size.width - spacing * CGFloat(columns + 1)) / CGFloat(columns)
+            ScrollView {
+                VStack(spacing: 16) {
+                    if !hasBIOS {
+                        BIOSBanner { startImport(.bios) }
+                            .padding(16)
+                            .ymirGlassCard()
+                    }
+                    LazyVGrid(
+                        columns: Array(repeating: GridItem(.fixed(side), spacing: spacing), count: columns),
+                        spacing: 20
+                    ) {
+                        ForEach(filteredGames) { game in
+                            Button {
+                                play(game)
+                            } label: {
+                                GameTile(game: game, isActive: game.url.path == activePath, side: side)
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu { gameMenu(game) }
+                        }
+                    }
+                }
+                .padding(.horizontal, spacing)
+                .padding(.top, 8)
+                .padding(.bottom, 24)
+            }
+            .background(YmirBackdrop())
+        }
     }
 
     private func refresh() {
@@ -419,6 +472,41 @@ private struct GameRow: View {
             }
         }
         .padding(.vertical, 6)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct GameTile: View {
+    let game: GameEntry
+    let isActive: Bool
+    let side: CGFloat
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            CoverArtView(game: game, size: side)
+                .shadow(color: .black.opacity(0.28), radius: 10, y: 6)
+                .overlay(alignment: .bottomTrailing) {
+                    if isActive {
+                        Image(systemName: "play.fill")
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .ymirGlass(in: Circle(), interactive: false)
+                            .padding(8)
+                    }
+                }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(game.title)
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
+                Text(game.format)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(width: side, alignment: .leading)
+        }
         .contentShape(Rectangle())
     }
 }

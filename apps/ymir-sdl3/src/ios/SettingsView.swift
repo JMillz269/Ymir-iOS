@@ -80,6 +80,156 @@ private func percent(_ value: Double) -> String {
 
 // MARK: - Settings home
 
+/// A one-tap bundle of speed and accuracy options. The same bundles back the presets in Advanced.
+enum PerformanceProfile: String, CaseIterable, Identifiable {
+    case speed, balanced, accuracy
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .speed: return "Speed"
+        case .balanced: return "Balanced"
+        case .accuracy: return "Accuracy"
+        }
+    }
+
+    func apply(to store: SettingStore) {
+        let values: (sh2Cache: Bool, interpolation: Int, granularity: Int, smooth: Bool)
+        switch self {
+        case .speed: values = (false, 0, 0, true)
+        case .balanced: values = (false, 1, 0, true)
+        case .accuracy: values = (true, 1, 5, false)
+        }
+        let (sh2Cache, interpolation, granularity, smooth) = values
+        store.bool("audio.threadedSCSP").wrappedValue = smooth
+        store.int("video.framePacing").wrappedValue = smooth ? 1 : 0
+        store.int("video.frameDelay").wrappedValue = smooth ? 1 : 0
+        store.bool("system.emulateSH2Cache").wrappedValue = sh2Cache
+        store.intSlider("system.sh2ClockFactor").wrappedValue = 100
+        store.int("audio.interpolation").wrappedValue = interpolation
+        store.int("audio.stepGranularity").wrappedValue = granularity
+        store.intSlider("cdblock.readSpeed").wrappedValue = 2
+        store.bool("cdblock.useLLE").wrappedValue = false
+    }
+
+    /// The profile the current options match, or nil when they have been tuned by hand.
+    static var current: PerformanceProfile? {
+        let cache = YmirHost.boolValue(key: "system.emulateSH2Cache", default: false)
+        let pacing = YmirHost.intValue(key: "video.framePacing", default: 1)
+        let interpolation = YmirHost.intValue(key: "audio.interpolation", default: 1)
+        let granularity = YmirHost.intValue(key: "audio.stepGranularity", default: 0)
+        if cache && pacing == 0 && granularity == 5 { return .accuracy }
+        if !cache && pacing == 1 && interpolation == 0 { return .speed }
+        if !cache && pacing == 1 && interpolation == 1 && granularity == 0 { return .balanced }
+        return nil
+    }
+}
+
+/// A rounded, coloured icon tile in the style of the iOS Settings app.
+private struct SettingsIcon: View {
+    let systemName: String
+    let tint: Color
+    var size: CGFloat = 30
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+                .fill(tint)
+            RoundedRectangle(cornerRadius: size * 0.28, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.35), lineWidth: 0.5)
+            Image(systemName: systemName)
+                .font(.system(size: size * 0.54, weight: .semibold))
+                .foregroundStyle(.white)
+        }
+        .frame(width: size, height: size)
+    }
+}
+
+/// The content of a row inside a glass settings group: icon, title, current value and a chevron.
+private struct SettingsRowLabel: View {
+    let icon: String
+    let tint: Color
+    let title: String
+    var value: String?
+    var showsChevron = true
+
+    var body: some View {
+        HStack(spacing: 12) {
+            SettingsIcon(systemName: icon, tint: tint)
+            Text(title)
+                .foregroundStyle(.primary)
+            Spacer(minLength: 8)
+            if let value {
+                Text(value)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct SettingsNavRow<Destination: View>: View {
+    let icon: String
+    let tint: Color
+    let title: String
+    var value: String?
+    @ViewBuilder let destination: () -> Destination
+
+    var body: some View {
+        NavigationLink {
+            destination()
+        } label: {
+            SettingsRowLabel(icon: icon, tint: tint, title: title, value: value)
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct SettingsRowDivider: View {
+    var body: some View {
+        Divider().padding(.leading, 56)
+    }
+}
+
+/// A titled group of rows on one Liquid Glass card, with an optional footnote underneath.
+private struct SettingsGroup<Content: View>: View {
+    var title: String?
+    var footer: String?
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let title {
+                Text(title)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .padding(.leading, 16)
+            }
+            VStack(spacing: 0) {
+                content()
+            }
+            .ymirGlassCard()
+            if let footer {
+                Text(footer)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 16)
+            }
+        }
+    }
+}
+
 /// The app's settings. Everything that was in the desktop frontend's menus and settings window lives here.
 struct SettingsView: View {
     @ObservedObject private var store = SettingStore.shared
@@ -93,112 +243,132 @@ struct SettingsView: View {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
     }
 
+    private var profile: Binding<PerformanceProfile?> {
+        Binding(
+            get: { PerformanceProfile.current },
+            set: { newValue in
+                if let newValue {
+                    newValue.apply(to: store)
+                }
+            }
+        )
+    }
+
+    private var displayValue: String {
+        let renderer = YmirHost.boolValue(key: "video.metalRenderer", default: false) ? "Metal" : "Software"
+        return YmirHost.boolValue(key: "video.sharpPixels", default: false) ? renderer + " · Sharp" : renderer
+    }
+
+    private var audioValue: String {
+        if YmirHost.boolValue(key: "audio.mute", default: false) { return "Muted" }
+        let volume = Double(YmirHost.floatValue(key: "audio.volume", default: 1))
+        return String(format: "%.0f%%", volume * 100)
+    }
+
+    private var controlsValue: String {
+        YmirHost.boolValue(key: "touch.enabled", default: true) ? "Touch" : "Off"
+    }
+
+    private var emulationValue: String {
+        if YmirHost.boolValue(key: "general.rewind", default: false) { return "Rewind on" }
+        return YmirHost.boolValue(key: "general.useAltSpeed", default: false) ? "Alt speed" : "Normal"
+    }
+
+    private var systemValue: String {
+        YmirHost.boolValue(key: "system.autodetectRegion", default: true) ? "Auto" : "Manual"
+    }
+
+    private var advancedValue: String {
+        YmirHost.jitAvailable && YmirHost.boolValue(key: "system.useRecompiler", default: false) ? "JIT" : "Interpreter"
+    }
+
     var body: some View {
-        Form {
-            Section {
-                HStack {
-                    Label("BIOS", systemImage: "cpu")
-                    Spacer()
-                    if hasBIOS {
-                        Text(biosName)
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                    } else {
-                        Text("Not loaded")
-                            .foregroundStyle(.orange)
+        ScrollView {
+            VStack(spacing: 22) {
+                biosCard
+
+                SettingsGroup(
+                    title: "Performance profile",
+                    footer: "Sets several speed and accuracy options at once. Fine-tune them under Advanced."
+                ) {
+                    Picker("Performance profile", selection: profile) {
+                        ForEach(PerformanceProfile.allCases) { item in
+                            Text(item.label).tag(Optional(item))
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .padding(10)
+                }
+
+                SettingsGroup {
+                    SettingsNavRow(icon: "tv", tint: .blue, title: "Display", value: displayValue) {
+                        DisplaySettingsView()
+                    }
+                    SettingsRowDivider()
+                    SettingsNavRow(icon: "speaker.wave.2.fill", tint: .red, title: "Audio", value: audioValue) {
+                        AudioSettingsView()
+                    }
+                    SettingsRowDivider()
+                    SettingsNavRow(icon: "gamecontroller.fill", tint: .gray, title: "Controls", value: controlsValue) {
+                        ControlsSettingsView()
+                    }
+                    SettingsRowDivider()
+                    SettingsNavRow(icon: "forward.frame.fill", tint: .green, title: "Emulation", value: emulationValue) {
+                        EmulationSettingsView()
                     }
                 }
-                Button {
-                    showImporter = true
-                } label: {
-                    Label(hasBIOS ? "Replace BIOS…" : "Import BIOS…", systemImage: "square.and.arrow.down")
-                }
-            } footer: {
-                Text("A Sega Saturn BIOS (IPL ROM) image is required to run games.")
-            }
 
-            Section {
-                NavigationLink {
-                    DisplaySettingsView()
-                } label: {
-                    Label("Display", systemImage: "tv")
+                SettingsGroup(title: "Console") {
+                    SettingsNavRow(icon: "globe", tint: .purple, title: "System & Region", value: systemValue) {
+                        SystemSettingsView()
+                    }
+                    SettingsRowDivider()
+                    SettingsNavRow(icon: "memorychip", tint: .indigo, title: "Cartridge") {
+                        CartridgeSettingsView()
+                    }
+                    SettingsRowDivider()
+                    SettingsNavRow(icon: "opticaldisc", tint: .cyan, title: "CD Drive") {
+                        CDBlockSettingsView()
+                    }
                 }
-                NavigationLink {
-                    AudioSettingsView()
-                } label: {
-                    Label("Audio", systemImage: "speaker.wave.2")
-                }
-                NavigationLink {
-                    ControlsSettingsView()
-                } label: {
-                    Label("Controls", systemImage: "gamecontroller")
-                }
-                NavigationLink {
-                    EmulationSettingsView()
-                } label: {
-                    Label("Emulation", systemImage: "forward.frame")
-                }
-            }
 
-            Section {
-                NavigationLink {
-                    SystemSettingsView()
-                } label: {
-                    Label("System & Region", systemImage: "globe")
+                SettingsGroup(title: "More") {
+                    SettingsNavRow(icon: "speedometer", tint: .orange, title: "Advanced", value: advancedValue) {
+                        PerformanceSettingsView()
+                    }
+                    SettingsRowDivider()
+                    SettingsNavRow(icon: "rectangle.on.rectangle", tint: .pink, title: "Interface") {
+                        InterfaceSettingsView()
+                    }
                 }
-                NavigationLink {
-                    CartridgeSettingsView()
-                } label: {
-                    Label("Cartridge", systemImage: "memorychip")
-                }
-                NavigationLink {
-                    CDBlockSettingsView()
-                } label: {
-                    Label("CD Drive", systemImage: "opticaldisc")
-                }
-                NavigationLink {
-                    PerformanceSettingsView()
-                } label: {
-                    Label("Performance & Accuracy", systemImage: "speedometer")
-                }
-                NavigationLink {
-                    InterfaceSettingsView()
-                } label: {
-                    Label("Interface", systemImage: "rectangle.on.rectangle")
-                }
-            }
 
-            Section {
-                NavigationLink {
-                    SaveStateManagerView()
-                } label: {
-                    Label("Save States", systemImage: "clock.arrow.circlepath")
+                SettingsGroup(
+                    title: "Files",
+                    footer: "Games, BIOS images, save data and screenshots live in the Ymir folder, which is visible in the Files app."
+                ) {
+                    SettingsNavRow(icon: "clock.arrow.circlepath", tint: .teal, title: "Save States") {
+                        SaveStateManagerView()
+                    }
+                    SettingsRowDivider()
+                    Button {
+                        FilesApp.openDocuments()
+                    } label: {
+                        SettingsRowLabel(icon: "folder.fill", tint: .gray, title: "Open Ymir Folder in Files", showsChevron: false)
+                    }
+                    .buttonStyle(.plain)
                 }
-                Button {
-                    FilesApp.openDocuments()
-                } label: {
-                    Label("Open Ymir Folder in Files", systemImage: "folder")
-                }
-            } header: {
-                Text("Files")
-            } footer: {
-                Text("Save States lists and manages the save states of all games. Games, BIOS images, save data and screenshots live in the Ymir folder, which is visible in the Files app.")
-            }
 
-            Section("About") {
-                HStack {
-                    Text("Ymir")
-                    Spacer()
-                    Text(version).foregroundStyle(.secondary)
-                }
-                Text("Sega Saturn emulator")
+                Text("Ymir \(version) · Sega Saturn emulator")
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
+                    .padding(.bottom, 8)
             }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 24)
         }
+        .background(YmirBackdrop())
         .onAppear {
             hasBIOS = YmirHost.hasBIOS
             biosName = YmirHost.biosName
@@ -219,6 +389,30 @@ struct SettingsView: View {
         } message: {
             Text(biosAlert ?? "")
         }
+    }
+
+    /// The BIOS is the one thing the app can't run without, so its state sits on top as a status card.
+    private var biosCard: some View {
+        HStack(spacing: 12) {
+            SettingsIcon(systemName: "cpu", tint: hasBIOS ? .green : .orange, size: 40)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(hasBIOS ? "Saturn BIOS ready" : "BIOS required")
+                    .font(.headline)
+                Text(hasBIOS ? biosName : "Import a Sega Saturn BIOS (IPL ROM) to run games.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            Button(hasBIOS ? "Replace" : "Import") {
+                showImporter = true
+            }
+            .ymirSecondaryButton()
+            .controlSize(.small)
+        }
+        .padding(14)
+        .ymirGlassCard()
     }
 
     private func importBIOS(_ urls: [URL]) {
@@ -655,13 +849,13 @@ struct PerformanceSettingsView: View {
         Form {
             Section {
                 Button("Recommended") {
-                    apply(sh2Cache: false, interpolation: 1, granularity: 0, lle: false, smooth: true)
+                    PerformanceProfile.balanced.apply(to: store)
                 }
                 Button("Best Accuracy") {
-                    apply(sh2Cache: true, interpolation: 1, granularity: 5, lle: false, smooth: false)
+                    PerformanceProfile.accuracy.apply(to: store)
                 }
                 Button("Best Performance") {
-                    apply(sh2Cache: false, interpolation: 0, granularity: 0, lle: false, smooth: true)
+                    PerformanceProfile.speed.apply(to: store)
                 }
             } header: {
                 Text("Presets")
@@ -747,7 +941,7 @@ struct PerformanceSettingsView: View {
                 Text("Measures every frame in detail (frame times, CPU time per thread, GPU time, when frames reach the screen) and writes it to metal-vdp-log.txt in the app's Documents folder every 5 seconds. Nothing is logged while it is off. Leave it off for normal play: measuring costs a little time and battery. Turn it on before the session you want a log of, when sending logs.")
             }
         }
-        .navigationTitle("Performance")
+        .navigationTitle("Advanced")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { refreshJIT() }
         .onReceive(NotificationCenter.default.publisher(for: UIApplication.didBecomeActiveNotification)) { _ in
@@ -788,18 +982,6 @@ struct PerformanceSettingsView: View {
             }
         }
         attempt(0)
-    }
-
-    private func apply(sh2Cache: Bool, interpolation: Int, granularity: Int, lle: Bool, smooth: Bool) {
-        store.bool("audio.threadedSCSP").wrappedValue = smooth
-        store.int("video.framePacing").wrappedValue = smooth ? 1 : 0
-        store.int("video.frameDelay").wrappedValue = smooth ? 1 : 0
-        store.bool("system.emulateSH2Cache").wrappedValue = sh2Cache
-        store.intSlider("system.sh2ClockFactor").wrappedValue = 100
-        store.int("audio.interpolation").wrappedValue = interpolation
-        store.int("audio.stepGranularity").wrappedValue = granularity
-        store.intSlider("cdblock.readSpeed").wrappedValue = 2
-        store.bool("cdblock.useLLE").wrappedValue = lle
     }
 }
 
