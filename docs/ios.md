@@ -102,6 +102,15 @@ Transparent Meshes the mesh layer is drawn at the internal resolution too, and S
 can't be created the
 setting is turned off again and the software renderer is used.
 
+Frame Pacing (Display settings, with Video Sync on) picks how frames are timed. Exact Speed runs the Saturn at its own
+rate (59.83 Hz NTSC) on a timer, so a frame is shown twice about every 6 seconds on a 60 Hz display. Match Display
+waits for the display instead and shows exactly one game frame per display frame (every second refresh at 120 Hz); the
+emulation then runs 0.3% fast and the sound is played back that much faster through the audio stream's frequency ratio,
+nudged to keep the sound buffer half full. Either way the minimum time each frame stays on the screen is rounded to
+whole refreshes of the display, minus half a refresh, so a ProMotion display never holds a frame for an extra refresh.
+Every 600 frames the log also notes when frames actually reached the screen (`display: ...`): how many stayed up longer
+than meant or were never shown.
+
 `tools/render-tests/hr_render_test.cpp` renders a synthetic scene headlessly through the software renderer
 (`build.sh` builds it against a core build) to check the output and time frames.
 

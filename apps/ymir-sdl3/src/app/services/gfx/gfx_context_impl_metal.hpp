@@ -65,6 +65,8 @@ public:
     bool SupportsUpscaling() const override;
     void SetUpscaleMode(UpscaleMode mode) override;
     void SetFrameRateHint(double framesPerSecond) override;
+    void WaitForDisplay(uint32 maxQueued, double timeoutMs) override;
+    double GetDisplayRefreshRate() const override;
     void SetPostProcess(const PostProcessParams &params) override;
 
     /// @brief Retrieves a pointer to the `id<MTLDevice>` managed by this graphics context.

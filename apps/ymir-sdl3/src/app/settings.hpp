@@ -482,6 +482,9 @@ struct Settings {
         bool syncInFullscreenMode;
         bool useFullRefreshRateWithVideoSync;
         bool reduceLatency;
+        // How video sync paces frames: 0 = run at the Saturn's exact speed on a timer, 1 = lock to the display's refresh
+        // (one game frame per display frame; emulation and sound run that much faster, e.g. 0.3% for 59.83 Hz on 60 Hz)
+        int framePacing;
 
         int metalFXMode; // 0=off, 1=spatial, 2=temporal (see gfx::UpscaleMode); iOS only
 

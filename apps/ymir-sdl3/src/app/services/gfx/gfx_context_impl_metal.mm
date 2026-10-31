@@ -15,6 +15,9 @@
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
 #import <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+    #import <UIKit/UIKit.h>
+#endif
 
 // MetalFX upscaling is only used on iOS
 #if TARGET_OS_IOS && __has_include(<MetalFX/MetalFX.h>)
@@ -35,10 +38,17 @@ CMRC_DECLARE(ymir_sdl3_shaders);
 #include <cstring>
 #include <optional>
 #include <cmath>
+#include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 
 using namespace ymir::gpu;
+
+namespace ymir::vdp::metal {
+// Shared with the Metal renderer: appends a line to metal-vdp-log.txt in the Documents folder
+void LogMessage(const char *format, ...) __attribute__((format(printf, 1, 2)));
+} // namespace ymir::vdp::metal
 
 namespace app::gfx {
 
@@ -372,6 +382,51 @@ struct MetalGraphicsContext::Impl {
 
     PresentMode presentMode = PresentMode::VSync;
     double frameRateHint = 0.0; // frames per second the app presents; 0 = unrestricted
+
+    // -- Presentation timing --
+
+    /// When the frames presented actually reached the screen; shared with the presented handlers of the drawables
+    struct PresentStats {
+        std::mutex mutex;
+        std::condition_variable cv;
+        uint32 pending = 0; ///< presented but not on the screen yet
+        double lastShownTime = 0.0;
+        double expectedInterval = 0.0; ///< seconds each frame is meant to stay on the screen
+        uint32 frames = 0, skipped = 0, held = 0, early = 0;
+        double intervalSum = 0.0, worstInterval = 0.0;
+    };
+    std::shared_ptr<PresentStats> presentStats = std::make_shared<PresentStats>();
+
+    /// The display's maximum refresh rate (120 on ProMotion iPhones), 0 if unknown
+    static double DisplayRefreshRate() {
+#if TARGET_OS_IPHONE
+        return (double)[UIScreen mainScreen].maximumFramesPerSecond;
+#else
+        return 0.0;
+#endif
+    }
+
+    /// How long a frame must stay on the screen at least for frames to be shown at frameRateHint. Rounded to whole
+    /// display refreshes and then cut by half a refresh: asking for exactly 1/59.83 s on a 120 Hz display (16.71 ms,
+    /// just over two refreshes of 8.33 ms) would hold a frame for a third refresh.
+    double MinimumFrameDuration(double *expected) const {
+        const double refresh = DisplayRefreshRate();
+        if (refresh <= 0.0) {
+            *expected = 1.0 / frameRateHint;
+            return 1.0 / frameRateHint;
+        }
+        const double ticks = std::max(1.0, std::round(refresh / frameRateHint));
+        *expected = ticks / refresh;
+        return (ticks - 0.5) / refresh;
+    }
+
+    /// Waits until at most maxQueued frames are still waiting to reach the screen, or until the timeout passes
+    void WaitForDisplay(uint32 maxQueued, double timeoutMs) {
+        PresentStats &st = *presentStats;
+        std::unique_lock lock{st.mutex};
+        st.cv.wait_for(lock, std::chrono::duration<double, std::milli>(timeoutMs),
+                       [&] { return st.pending <= maxQueued; });
+    }
 
     // -- Post processing filters --
 
@@ -1004,10 +1059,54 @@ struct MetalGraphicsContext::Impl {
 
         @autoreleasepool {
             if (currentDrawable != nil && cmdListFrame != nil) {
+                double expected = 0.0;
+                const double minDuration = frameRateHint > 0.0 ? MinimumFrameDuration(&expected) : 0.0;
+                {
+                    std::lock_guard lock{presentStats->mutex};
+                    ++presentStats->pending;
+                    presentStats->expectedInterval = expected;
+                }
+                std::shared_ptr<PresentStats> stats = presentStats;
+                [currentDrawable addPresentedHandler:^(id<MTLDrawable> drawable) {
+                  const double shown = drawable.presentedTime;
+                  bool log = false;
+                  PresentStats &st = *stats;
+                  {
+                      std::lock_guard lock{st.mutex};
+                      st.pending = st.pending > 0 ? st.pending - 1 : 0;
+                      if (shown <= 0.0) {
+                          ++st.skipped; // replaced by a newer frame before it could be shown
+                      } else {
+                          if (st.lastShownTime > 0.0 && st.expectedInterval > 0.0) {
+                              const double interval = shown - st.lastShownTime;
+                              ++st.frames;
+                              st.intervalSum += interval;
+                              st.worstInterval = std::max(st.worstInterval, interval);
+                              if (interval > st.expectedInterval * 1.4) {
+                                  ++st.held; // the previous frame stayed on the screen longer than meant
+                              } else if (interval < st.expectedInterval * 0.6) {
+                                  ++st.early;
+                              }
+                              log = st.frames >= 600;
+                          }
+                          st.lastShownTime = shown;
+                      }
+                      if (log) {
+                          ymir::vdp::metal::LogMessage(
+                              "display: last %u frames on the screen every %.2f ms on average (meant %.2f ms), worst "
+                              "%.2f ms; %u stayed up longer than meant, %u were replaced early, %u were never shown",
+                              st.frames, st.intervalSum / st.frames * 1000.0, st.expectedInterval * 1000.0,
+                              st.worstInterval * 1000.0, st.held, st.early, st.skipped);
+                          st.frames = st.held = st.early = st.skipped = 0;
+                          st.intervalSum = st.worstInterval = 0.0;
+                      }
+                  }
+                  st.cv.notify_all();
+                }];
                 if (frameRateHint > 0.0) {
                     // Lets a variable refresh rate (ProMotion) display settle at the rate frames are produced at
                     // instead of running at its maximum rate
-                    [cmdListFrame presentDrawable:currentDrawable afterMinimumDuration:1.0 / frameRateHint];
+                    [cmdListFrame presentDrawable:currentDrawable afterMinimumDuration:minDuration];
                 } else {
                     [cmdListFrame presentDrawable:currentDrawable];
                 }
@@ -1734,6 +1833,14 @@ bool MetalGraphicsContext::SupportsUpscaling() const {
 
 void MetalGraphicsContext::SetFrameRateHint(double framesPerSecond) {
     m_impl->frameRateHint = framesPerSecond;
+}
+
+void MetalGraphicsContext::WaitForDisplay(uint32 maxQueued, double timeoutMs) {
+    m_impl->WaitForDisplay(maxQueued, timeoutMs);
+}
+
+double MetalGraphicsContext::GetDisplayRefreshRate() const {
+    return Impl::DisplayRefreshRate();
 }
 
 void MetalGraphicsContext::SetUpscaleMode(UpscaleMode mode) {

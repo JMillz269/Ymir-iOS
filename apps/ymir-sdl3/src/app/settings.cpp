@@ -1130,6 +1130,7 @@ void Settings::ResetToDefaults() {
     video.useFullRefreshRateWithVideoSync = false;
     video.reduceLatency = true;
     video.metalFXMode = 0;
+    video.framePacing = 0;
     video.forceStretch = false;
     video.portraitStretchHeight = 0.0f;
     video.sharpness = 0.0f;
@@ -1649,6 +1650,8 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblVideo, "PortraitStretchHeight", video.portraitStretchHeight);
         video.portraitStretchHeight = std::clamp(video.portraitStretchHeight, 0.0f, 1.0f);
         Parse(tblVideo, "MetalFXMode", video.metalFXMode);
+        Parse(tblVideo, "FramePacing", video.framePacing);
+        video.framePacing = std::clamp(video.framePacing, 0, 1);
         video.metalFXMode = std::clamp(video.metalFXMode, 0, 2);
         Parse(tblVideo, "Sharpness", video.sharpness);
         Parse(tblVideo, "Scanlines", video.scanlines);
@@ -2100,6 +2103,7 @@ SettingsSaveResult Settings::Save() {
             {"ForceStretch", video.forceStretch},
             {"PortraitStretchHeight", video.portraitStretchHeight},
             {"MetalFXMode", video.metalFXMode},
+            {"FramePacing", video.framePacing},
             {"Sharpness", video.sharpness},
             {"Scanlines", video.scanlines},
             {"MaskStrength", video.maskStrength},

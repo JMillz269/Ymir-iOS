@@ -138,6 +138,7 @@
 #include <rtmidi/RtMidi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <clocale>
 #include <ctime>
 #include <mutex>
@@ -1548,6 +1549,7 @@ void App::RunEmulator() {
 
     screen.nextFrameTarget = clk::now();
     double avgFrameDelay = 0.0;
+    double avgAudioBufferPct = 0.5; // for display paced frames: smoothed audio buffer level
 
     bool imguiWantedKeyboardInput = false;
     bool imguiWantedMouseInput = false;
@@ -1620,8 +1622,40 @@ void App::RunEmulator() {
                 maxFrameRate = std::max(maxFrameRate, 48.0);
             }
 
+            // Frame pacing by the display: show one game frame on every display frame (or every two at 120 Hz) instead
+            // of on a timer at the Saturn's own rate. Emulation and sound then run that much faster or slower (0.3%
+            // for 59.83 Hz shown at 60 Hz), and no frame is ever shown twice or skipped because the two rates drift
+            // apart. Only for rates close enough to the display's.
+            bool displayPaced = false;
+            double displayFrameRate = 0.0;
+            if (screen.videoSync && settings.video.framePacing == 1 &&
+                m_context.emuSpeed.GetCurrentSpeedFactor() == 1.0) {
+                const double refresh = m_graphicsService.GetDisplayRefreshRate();
+                if (refresh > 0.0) {
+                    const double ticks = std::max(1.0, std::round(refresh / baseFrameRate));
+                    displayFrameRate = refresh / ticks;
+                    const double ratio = displayFrameRate / baseFrameRate;
+                    displayPaced = ratio > 0.97 && ratio < 1.03;
+                }
+            }
+            if (displayPaced) {
+                // Play the sound at the same speed up, nudged by how full the sound buffer is so that it stays half full
+                const double audioBufferPct = (double)m_context.audioSystem.GetBufferCount() /
+                                              std::max<uint32>(1u, m_context.audioSystem.GetBufferCapacity());
+                avgAudioBufferPct += (audioBufferPct - avgAudioBufferPct) * 0.05;
+                const double correction = std::clamp((avgAudioBufferPct - 0.5) * 0.02, -0.005, 0.005);
+                m_context.audioSystem.SetSpeedRatio(displayFrameRate / baseFrameRate * (1.0 + correction));
+            } else {
+                avgAudioBufferPct = 0.5;
+                m_context.audioSystem.SetSpeedRatio(1.0);
+            }
+
             // Compute GUI frame duplication
-            if (baseFrameRate <= maxFrameRate) {
+            if (displayPaced) {
+                screen.dupGUIFrames = 1;
+                baseFrameInterval = std::chrono::duration_cast<decltype(baseFrameInterval)>(
+                    std::chrono::duration<double>(1.0 / displayFrameRate));
+            } else if (baseFrameRate <= maxFrameRate) {
                 // Duplicate frames displayed by the GUI to maintain the minimum requested GUI frame rate
                 screen.dupGUIFrames = std::max(1.0, std::floor(maxFrameRate / baseFrameRate));
                 baseFrameInterval /= screen.dupGUIFrames;
@@ -1632,7 +1666,8 @@ void App::RunEmulator() {
 
             // Tell the display how often frames are going to be presented, so that a variable refresh rate display
             // doesn't run faster than needed
-            m_graphicsService.SetFrameRateHint(screen.videoSync ? baseFrameRate * screen.dupGUIFrames : 0.0);
+            m_graphicsService.SetFrameRateHint(
+                screen.videoSync ? (displayPaced ? displayFrameRate : baseFrameRate * screen.dupGUIFrames) : 0.0);
 
             // Update VSync setting
             gfx::PresentMode newPresentMode;
@@ -1662,7 +1697,11 @@ void App::RunEmulator() {
                     frameInterval * avgFrameDelay * frameIntervalAdjustFactor);
             }
 
-            if (screen.videoSync) {
+            if (displayPaced) {
+                // The display sets the pace: go on once no more than one frame is still waiting to be shown
+                m_graphicsService.WaitForDisplay(1, 50.0);
+                screen.nextFrameTarget = clk::now();
+            } else if (screen.videoSync) {
                 // Sleep until 1ms before the next frame presentation time, then spin wait for the deadline
                 bool skipDelay = false;
                 auto now = clk::now();
@@ -1698,6 +1737,7 @@ void App::RunEmulator() {
                 screen.expectFrame = true;
             }
         } else {
+            m_context.audioSystem.SetSpeedRatio(1.0);
             screen.frameRequestEvent.Set();
         }
 

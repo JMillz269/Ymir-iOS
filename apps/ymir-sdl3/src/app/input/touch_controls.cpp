@@ -486,9 +486,13 @@ void TouchControls::Update(SDL_Window *window, ImVec2 displaySize) {
         Save();
     }
 
+    // Always keep the layout up to date, even while the controls are hidden: it also tracks the orientation, which picks
+    // where the game screen goes. Skipping it while a controller was connected left the screen placed for the
+    // orientation the app had before (portrait), pushing the picture off the display in landscape.
+    ComputeLayout(window, displaySize);
+
     if (m_editing) {
-        // The controls are only being arranged: keep the layout up to date and send no inputs
-        ComputeLayout(window, displaySize);
+        // The controls are only being arranged: send no inputs
         return;
     }
 
@@ -496,7 +500,6 @@ void TouchControls::Update(SDL_Window *window, ImVec2 displaySize) {
         return;
     }
 
-    ComputeLayout(window, displaySize);
     DropEndedFingers();
 
     std::array<bool, _Count> state{};

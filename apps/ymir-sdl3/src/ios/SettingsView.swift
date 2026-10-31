@@ -325,12 +325,17 @@ struct DisplaySettingsView: View {
 
             Section {
                 Toggle("Video Sync", isOn: store.bool("video.sync", default: true))
+                Picker("Frame Pacing", selection: store.int("video.framePacing")) {
+                    Text("Exact Speed").tag(0)
+                    Text("Match Display").tag(1)
+                }
+                .disabled(!store.bool("video.sync", default: true).wrappedValue)
                 Toggle("Use Full Refresh Rate", isOn: store.bool("video.fullRefreshRate"))
                 Toggle("Reduce Latency", isOn: store.bool("video.reduceLatency"))
             } header: {
                 Text("Synchronization")
             } footer: {
-                Text("Video sync paces emulation to the display. Reduce Latency helps on displays with a low refresh rate.")
+                Text("Video sync paces emulation to the display. Frame Pacing picks how: Exact Speed runs the game at the Saturn's own rate (59.83 frames per second), so about every 6 seconds one frame stays on the screen twice as long. Match Display shows exactly one game frame per display refresh for the smoothest motion; the game and its sound then run 0.3% faster, which you can't hear. Use Full Refresh Rate does nothing with Match Display. Reduce Latency helps on displays with a low refresh rate.")
             }
         }
         .navigationTitle("Display")

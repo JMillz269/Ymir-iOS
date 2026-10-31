@@ -158,6 +158,8 @@ void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Setti
             [cfg](bool v) { cfg->video.syncInFullscreenMode = v; });
     addBool("video.fullRefreshRate", [cfg] { return cfg->video.useFullRefreshRateWithVideoSync; },
             [cfg](bool v) { cfg->video.useFullRefreshRateWithVideoSync = v; });
+    addInt("video.framePacing", [cfg] { return cfg->video.framePacing; },
+           [cfg](int v) { cfg->video.framePacing = std::clamp(v, 0, 1); });
     addBool("video.reduceLatency", [cfg] { return cfg->video.reduceLatency; },
             [cfg](bool v) { cfg->video.reduceLatency = v; });
 

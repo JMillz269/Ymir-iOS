@@ -257,6 +257,14 @@ void GraphicsService::SetFrameRateHint(double framesPerSecond) {
     m_gfxContext->SetFrameRateHint(framesPerSecond);
 }
 
+void GraphicsService::WaitForDisplay(uint32 maxQueued, double timeoutMs) {
+    m_gfxContext->WaitForDisplay(maxQueued, timeoutMs);
+}
+
+double GraphicsService::GetDisplayRefreshRate() const {
+    return m_gfxContext->GetDisplayRefreshRate();
+}
+
 util::ValueResult<PresentResult> GraphicsService::Present() {
     return m_gfxContext->Present();
 }
