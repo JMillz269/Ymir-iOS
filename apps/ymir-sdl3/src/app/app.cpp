@@ -1567,6 +1567,8 @@ void App::RunEmulator() {
 #endif
 
     std::array<GUIEvent, 64> evts{};
+    // GUI events that came in while a native screen covered the emulator, to be handled once it's back (iOS)
+    std::vector<GUIEvent> deferredGUIEvents;
 
 #if Ymir_ENABLE_IMGUI_DEMO
     bool showImGuiDemoWindow = false;
@@ -2057,6 +2059,20 @@ void App::RunEmulator() {
             // never gets to process the pause event and the audio keeps repeating the last buffer.
             screen.frameRequestEvent.Set();
             m_emuProcessEvent.Set();
+
+            // A state saved from the game menu is written to its file right away, so that it's kept even if the app
+            // is closed before going back to the game. The other events wait until the emulator is shown again.
+            {
+                const size_t count = m_context.eventQueues.gui.try_dequeue_bulk(evts.begin(), evts.size());
+                for (size_t i = 0; i < count; i++) {
+                    if (evts[i].type == GUIEvent::Type::StateSaved) {
+                        m_saveStateService.PersistSaveState(std::get<uint32>(evts[i].value));
+                    } else {
+                        deferredGUIEvents.push_back(evts[i]);
+                    }
+                }
+            }
+
             util::ios::PumpNativeUI(1.0 / 120.0);
             continue;
         }
@@ -2068,8 +2084,11 @@ void App::RunEmulator() {
         // Make emulator thread process next frame
         m_emuProcessEvent.Set();
 
-        // Process GUI events
-        const size_t evtCount = m_context.eventQueues.gui.try_dequeue_bulk(evts.begin(), evts.size());
+        // Process GUI events (those put aside while a native screen was shown first)
+        size_t evtCount = std::min(deferredGUIEvents.size(), evts.size());
+        std::copy_n(deferredGUIEvents.begin(), evtCount, evts.begin());
+        deferredGUIEvents.erase(deferredGUIEvents.begin(), deferredGUIEvents.begin() + evtCount);
+        evtCount += m_context.eventQueues.gui.try_dequeue_bulk(evts.begin() + evtCount, evts.size() - evtCount);
         for (size_t i = 0; i < evtCount; i++) {
             const GUIEvent &evt = evts[i];
             using EvtType = GUIEvent::Type;
