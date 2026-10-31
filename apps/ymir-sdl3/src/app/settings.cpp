@@ -1130,7 +1130,7 @@ void Settings::ResetToDefaults() {
     video.useFullRefreshRateWithVideoSync = false;
     video.reduceLatency = true;
     video.metalFXMode = 0;
-    video.framePacing = 0;
+    video.framePacing = 1; // Match Display: steadiest on iPhone (a frame held over about every 5 s instead of every 0.4 s)
     video.forceStretch = false;
     video.portraitStretchHeight = 0.0f;
     video.sharpness = 0.0f;

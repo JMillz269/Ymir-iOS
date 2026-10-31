@@ -325,7 +325,7 @@ struct DisplaySettingsView: View {
 
             Section {
                 Toggle("Video Sync", isOn: store.bool("video.sync", default: true))
-                Picker("Frame Pacing", selection: store.int("video.framePacing")) {
+                Picker("Frame Pacing", selection: store.int("video.framePacing", default: 1)) {
                     Text("Exact Speed").tag(0)
                     Text("Match Display").tag(1)
                 }
