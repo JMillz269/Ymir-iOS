@@ -93,6 +93,10 @@ struct GamesView: View {
                 if !hasBIOS {
                     Section {
                         BIOSBanner { startImport(.bios) }
+                            .padding(16)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .ymirGlassCard()
+                            .ymirGlassRow()
                     }
                 }
 
@@ -102,6 +106,9 @@ struct GamesView: View {
                             importGames: { startImport(.games) },
                             openFiles: { FilesApp.openDocuments() }
                         )
+                        .padding(16)
+                        .ymirGlassCard()
+                        .ymirGlassRow()
                     }
                 } else {
                     Section {
@@ -112,8 +119,13 @@ struct GamesView: View {
                                 }
                             } label: {
                                 GameRow(game: game, isActive: game.url.path == activePath)
+                                    .padding(.horizontal, 14)
+                                    .padding(.vertical, 6)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .ymirGlassCard(cornerRadius: 20)
                             }
                             .buttonStyle(.plain)
+                            .ymirGlassRow()
                             .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                                 Button(role: .destructive) {
                                     pendingDelete = game
@@ -129,6 +141,8 @@ struct GamesView: View {
                     }
                 }
             }
+            .scrollContentBackground(.hidden)
+            .background(YmirBackdrop())
             }
             }
             .environment(\.editMode, $editMode)
@@ -184,7 +198,7 @@ struct GamesView: View {
                     library.setArtwork(data, for: game)
                 }
             }
-            .listStyle(.insetGrouped)
+            .listStyle(.plain)
             .navigationTitle("Games")
             .searchable(text: $search, prompt: "Search games")
             .refreshable { refresh() }

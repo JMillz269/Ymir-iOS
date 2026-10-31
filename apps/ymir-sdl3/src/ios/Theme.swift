@@ -187,6 +187,17 @@ extension GlassSection where Header == Text, Footer == EmptyView {
     }
 }
 
+extension View {
+    /// Makes a list row a free-standing card: no row background or separator, with some air around it. The view
+    /// itself is expected to bring its own glass (see `ymirGlassCard`).
+    func ymirGlassRow() -> some View {
+        self
+            .listRowBackground(Color.clear)
+            .listRowSeparator(.hidden)
+            .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
+    }
+}
+
 /// A footnote that wraps at the width of the glass content, drawn by UIKit. SwiftUI's own `Text` stayed on one line as wide
 /// as the sentence here (the footers ran off the screen), whatever frame it was put in; a label that is told its width
 /// and measures its height for it can't.
