@@ -82,17 +82,6 @@ framebuffers only, and fills the normal-size framebuffer from them (the first su
 when the framebuffers swap, before a command that can only be drawn at the normal size and when the CPU reads the
 framebuffer.
 
-Diagnostics: the Metal renderer writes `metal-vdp-log.txt` to the Documents folder (started anew at every launch).
-Creating a folder named `metal-vdp-compare` there makes the software renderer draw VDP1 as well, and the log then lists
-the frames where the GPU's framebuffer differs from the software renderer's (with the pixels, the commands of the frame
-and a few more details). That is much slower; delete the folder for normal play. `tools/render-tests/vdp1_gpu_emu_test.cpp`
-runs the VDP1 compute shaders ported to C++ against the software renderer on a desktop machine.
-
-Creating a folder named `metal-vdp-profile` in the Documents folder makes the log also list, every 300 frames, how
-many milliseconds per frame the GPU spent on each kind of pass (VDP1 drawing and merging, at the normal and the scaled up
-size, erasing and writes, the VDP2 layers and composition, and the passes of the internal resolution). That runs the
-passes in separate encoders, so it is a little slower; delete the folder for normal play.
-
 With Direct Display (on by default) the finished image is copied into a texture of the display on the GPU, and the
 display waits for it on the GPU before scaling it (MetalFX, filters), so it never goes through the processor and arrives
 in the same frame; screenshots read it back. With it off, the image is read back from the GPU and shown through the
@@ -101,6 +90,12 @@ Deinterlacing need the GPU VDP1 option. With
 Transparent Meshes the mesh layer is drawn at the internal resolution too, and Skip Native Drawing works with it. If it
 can't be created the
 setting is turned off again and the software renderer is used.
+
+When the CPU reads the VDP1 framebuffer, the copy on the GPU is downloaded only if something drew into it since the last
+download: the CPU's own writes reach both copies alike, so a game that reads, writes and reads again waits for the GPU
+once.
+
+### Frame timing
 
 Frame Pacing (Display settings, with Video Sync on) picks how frames are timed. Exact Speed runs the Saturn at its own
 rate (59.83 Hz NTSC) on a timer, so a frame is shown twice about every 6 seconds on a 60 Hz display. Match Display
@@ -118,18 +113,7 @@ display (its spare time) and moves the start so that about 6 ms are left for the
 heavier frames: it backs off by 4 ms at once when a frame nearly misses and creeps up by at most 3 ms a second, up to
 12 ms.
 
-The detailed measurements (frame and CPU times, time per thread, GPU time, the scaled up image counts, when frames reach
-the screen, FBRAM downloads) are only taken and written to `metal-vdp-log.txt` while Performance Log (Performance
-settings) is on. Creating and releasing renderers and other events are always written.
-
-When the CPU reads the VDP1 framebuffer, the copy on the GPU is downloaded only if something drew into it since the last
-download: the CPU's own writes reach both copies alike, so a game that reads, writes and reads again waits for the GPU
-once.
-
-Game Mode: the app declares `GCSupportsGameMode` (and is in the games category), so iOS can switch Game Mode on while
-a game is in full screen: the system then gives the game priority on the CPU and GPU and lowers the latency of Bluetooth
-controllers and AirPods. Whether it is on is up to the system (Control Center shows it); the stats panel shows it too.
-When the app is run inside another app (LiveContainer), the system goes by that app's own settings instead.
+### Save states
 
 Autosave (Emulation settings, on by default) saves a state of the game into a slot of its own, "Autosave", whenever the
 game is left: the app is covered or sent to the background (the control center, a call, the app switcher, the home
@@ -146,6 +130,32 @@ library offers Load State with the game's slots, newest first. Save states are k
 disc image a folder belongs to in `game.txt` there (the path relative to the Ymir folder) whenever the game is started
 or a state is saved. States made before that are listed as an unknown game, by the title on the disc, until the game has
 been started once.
+
+### Game Mode
+
+Game Mode: the app declares `GCSupportsGameMode` (and is in the games category), so iOS can switch Game Mode on while
+a game is in full screen: the system then gives the game priority on the CPU and GPU and lowers the latency of Bluetooth
+controllers and AirPods. Whether it is on is up to the system (Control Center shows it); the stats panel shows it too.
+When the app is run inside another app (LiveContainer), the system goes by that app's own settings instead.
+
+### Diagnostics
+
+The detailed measurements (frame and CPU times, time per thread, GPU time, the scaled up image counts, when frames reach
+the screen, FBRAM downloads) are only taken and written to `metal-vdp-log.txt` while Performance Log (Performance
+settings) is on. Creating and releasing renderers and other events are always written.
+
+Diagnostics: the Metal renderer writes `metal-vdp-log.txt` to the Documents folder (started anew at every launch).
+Creating a folder named `metal-vdp-compare` there makes the software renderer draw VDP1 as well, and the log then lists
+the frames where the GPU's framebuffer differs from the software renderer's (with the pixels, the commands of the frame
+and a few more details). That is much slower; delete the folder for normal play. `tools/render-tests/vdp1_gpu_emu_test.cpp`
+runs the VDP1 compute shaders ported to C++ against the software renderer on a desktop machine.
+
+Creating a folder named `metal-vdp-profile` in the Documents folder makes the log also list, every 300 frames, how
+many milliseconds per frame the GPU spent on each kind of pass (VDP1 drawing and merging, at the normal and the scaled up
+size, erasing and writes, the VDP2 layers and composition, and the passes of the internal resolution). That runs the
+passes in separate encoders, so it is a little slower; delete the folder for normal play.
+
+The log is kept in two files, `metal-vdp-log.txt` and `metal-vdp-log-previous.txt` (the 4000 lines before it), so it stays small however long the game is played.
 
 `tools/render-tests/hr_render_test.cpp` renders a synthetic scene headlessly through the software renderer
 (`build.sh` builds it against a core build) to check the output and time frames.
@@ -199,7 +209,7 @@ are not all run. This is the common way games wait for a time to pass; the stati
 
 - Save and export dialogs don't exist on iOS; they write to `Documents/exports`.
 - Update checks are disabled. Rebuild from the workflow to update.
-- The Metal backend only handles presentation; VDP rendering runs on the CPU, as on macOS.
-- This port has not been run on a device by its author at the time of writing; expect rough edges and report them.
-
-- There is no Metal version of Ymir's GPU (hardware) VDP renderer, so graphics are always rendered on the CPU (multithreaded).
+- The Metal renderer and the GPU VDP1 option are experimental. Skip Native Drawing can confuse games that read the picture
+  while it is still being drawn.
+- At higher internal resolutions a thin line has been seen where polygons meet on a bridge in one game; it is not fixed yet.
+- Save states made before the Save States manager existed show as an unknown game until the game has been started once.

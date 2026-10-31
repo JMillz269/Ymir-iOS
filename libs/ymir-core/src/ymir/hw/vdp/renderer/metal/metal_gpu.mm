@@ -230,17 +230,33 @@ void LogMessage(const char *format, ...) {
     static FILE *file = nullptr;
     static bool opened = false;
     static uint32 lines = 0;
+    static std::string path, previousPath;
+    // The log is kept in two files, the current one and the one before it, so that it never grows past a few hundred KB
+    // however long the game is played, and the end of a long session is always in it
+    static constexpr uint32 kMaxLines = 4000;
     std::lock_guard<std::mutex> lock(mutex);
     if (!opened) {
         opened = true;
         NSArray<NSString *> *dirs = NSSearchPathForDirectoriesInDomains(NSDocumentDirectory, NSUserDomainMask, YES);
         if (dirs.count > 0) {
-            NSString *path = [dirs[0] stringByAppendingPathComponent:@"metal-vdp-log.txt"];
-            file = std::fopen([path fileSystemRepresentation], "w");
+            path = [[dirs[0] stringByAppendingPathComponent:@"metal-vdp-log.txt"] fileSystemRepresentation];
+            previousPath = [[dirs[0] stringByAppendingPathComponent:@"metal-vdp-log-previous.txt"] fileSystemRepresentation];
+            // (a log of an earlier run is not mixed up with this one)
+            std::remove(previousPath.c_str());
+            file = std::fopen(path.c_str(), "w");
         }
     }
-    if (file == nullptr || lines >= 3000) {
+    if (file == nullptr) {
         return;
+    }
+    if (lines >= kMaxLines) {
+        std::fclose(file);
+        std::rename(path.c_str(), previousPath.c_str());
+        file = std::fopen(path.c_str(), "w");
+        lines = 0;
+        if (file == nullptr) {
+            return;
+        }
     }
     ++lines;
     va_list args;
