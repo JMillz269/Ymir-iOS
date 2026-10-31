@@ -238,6 +238,7 @@ private struct SettingsGroup<Content: View>: View {
 /// The app's settings. Everything that was in the desktop frontend's menus and settings window lives here.
 struct SettingsView: View {
     @ObservedObject private var store = SettingStore.shared
+    @ObservedObject private var theme = BackdropTheme.shared
     @State private var hasBIOS = YmirHost.hasBIOS
     @State private var biosName = YmirHost.biosName
     @State private var showImporter = false
@@ -343,6 +344,11 @@ struct SettingsView: View {
                 }
 
                 SettingsGroup(title: "More") {
+                    SettingsNavRow(icon: "paintpalette.fill", tint: .mint, title: "Appearance",
+                                   value: theme.presetName ?? "Custom") {
+                        AppearanceSettingsView()
+                    }
+                    SettingsRowDivider()
                     SettingsNavRow(icon: "speedometer", tint: .orange, title: "Advanced", value: advancedValue) {
                         PerformanceSettingsView()
                     }
@@ -1028,6 +1034,103 @@ struct InterfaceSettingsView: View {
             }
         }
         .navigationTitle("Interface")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+// MARK: - Appearance
+
+/// Picks the colours of the backdrop: how many there are, which they are, and how strongly they show.
+struct AppearanceSettingsView: View {
+    @ObservedObject private var theme = BackdropTheme.shared
+
+    private func colorBinding(_ index: Int) -> Binding<Color> {
+        Binding(
+            get: { index < theme.colors.count ? theme.colors[index] : .clear },
+            set: { newValue in
+                if index < theme.colors.count {
+                    theme.colors[index] = newValue
+                }
+            }
+        )
+    }
+
+    var body: some View {
+        GlassForm {
+            GlassSection {
+                YmirBackdrop(isPreview: true)
+                    .frame(height: 150)
+                    .frame(maxWidth: .infinity)
+                    .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5))
+            }
+
+            GlassSection(content: {
+                Stepper(value: $theme.colorCount, in: BackdropTheme.minColors...BackdropTheme.maxColors) {
+                    HStack {
+                        Text("Colors")
+                        Spacer()
+                        Text("\(theme.colorCount)")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
+                }
+                ForEach(0..<theme.colorCount, id: \.self) { index in
+                    ColorPicker("Color \(index + 1)", selection: colorBinding(index), supportsOpacity: false)
+                }
+                SettingSlider(title: "Strength", value: $theme.intensity, range: 0...1.5,
+                              format: { String(format: "%.0f%%", $0 * 100) })
+            }, header: {
+                Text("Background")
+            }, footer: {
+                WrappedText("The background behind the menus is painted with these colors, which the glass picks up. Fewer colors look calmer; Strength sets how strongly they show, down to none at all.")
+            })
+
+            GlassSection(content: {
+                ForEach(BackdropTheme.presets) { preset in
+                    Button {
+                        theme.apply(preset)
+                    } label: {
+                        HStack(spacing: 12) {
+                            HStack(spacing: -6) {
+                                ForEach(Array(preset.colors.enumerated()), id: \.offset) { _, color in
+                                    Circle()
+                                        .fill(color)
+                                        .frame(width: 20, height: 20)
+                                        .overlay(Circle().strokeBorder(Color.white.opacity(0.4), lineWidth: 0.5))
+                                }
+                            }
+                            Text(preset.name)
+                                .foregroundStyle(.primary)
+                            Spacer(minLength: 8)
+                            if theme.presetName == preset.name {
+                                Image(systemName: "checkmark")
+                                    .font(.footnote.weight(.semibold))
+                                    .foregroundStyle(.tint)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }, header: {
+                Text("Themes")
+            }, footer: {
+                WrappedText("A theme sets the colors and how many of them are used. Change any of them afterwards to make your own.")
+            })
+
+            GlassSection {
+                Button {
+                    theme.reset()
+                } label: {
+                    Text("Reset to Aurora")
+                        .foregroundStyle(.red)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .navigationTitle("Appearance")
         .navigationBarTitleDisplayMode(.inline)
     }
 }

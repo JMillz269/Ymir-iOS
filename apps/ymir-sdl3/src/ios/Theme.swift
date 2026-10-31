@@ -275,8 +275,136 @@ struct GlassPicker<SelectionValue: Hashable, Content: View>: View {
 // MARK: - Backdrop
 
 /// A soft, colourful ambient background that gives glass something to refract.
+/// The colours of the backdrop, kept between launches. The player picks how many are used and which they are
+/// (Settings > Appearance); the positions of the blobs are fixed.
+final class BackdropTheme: ObservableObject {
+    static let shared = BackdropTheme()
+
+    /// A named set of colours.
+    struct Preset: Identifiable {
+        let name: String
+        let colors: [Color]
+        var id: String { name }
+    }
+
+    static let maxColors = 5
+    static let minColors = 2
+
+    /// The colours of the backdrop as it has always looked, and the ones the extra slots start from.
+    static let defaultColors: [Color] = [.indigo, .pink, .cyan, .orange, .purple]
+
+    static let presets: [Preset] = [
+        Preset(name: "Aurora", colors: [.indigo, .pink, .cyan, .orange]),
+        Preset(name: "Sunset", colors: [Color(hex: "FF7A3D"), Color(hex: "E8456F"), Color(hex: "7A3FA0")]),
+        Preset(name: "Ocean", colors: [Color(hex: "1565C0"), Color(hex: "16A3C8"), Color(hex: "0E7C66"), Color(hex: "4C5FD5")]),
+        Preset(name: "Forest", colors: [Color(hex: "2E7D32"), Color(hex: "7CB342"), Color(hex: "0E8A7A")]),
+        Preset(name: "Candy", colors: [Color(hex: "FF5FA2"), Color(hex: "9B5CFF"), Color(hex: "40D6D0"), Color(hex: "FFC14D")]),
+        Preset(name: "Saturn", colors: [Color(hex: "1A237E"), Color(hex: "C62828")]),
+        Preset(name: "Slate", colors: [Color(hex: "4A5568"), Color(hex: "2D3748")]),
+    ]
+
+    private static let countKey = "theme.backdropColorCount"
+    private static let colorsKey = "theme.backdropColors"
+    private static let intensityKey = "theme.backdropIntensity"
+
+    /// How many of the colours are used.
+    @Published var colorCount: Int {
+        didSet { UserDefaults.standard.set(colorCount, forKey: Self.countKey) }
+    }
+
+    /// Always `maxColors` colours; the ones past `colorCount` are kept for when the player asks for more again.
+    @Published var colors: [Color] {
+        didSet { UserDefaults.standard.set(colors.map(\.hexString), forKey: Self.colorsKey) }
+    }
+
+    /// How strongly the colours show, 0 (a plain background) to 1.5.
+    @Published var intensity: Double {
+        didSet { UserDefaults.standard.set(intensity, forKey: Self.intensityKey) }
+    }
+
+    private init() {
+        let defaults = UserDefaults.standard
+        var list = (defaults.array(forKey: Self.colorsKey) as? [String] ?? []).map { Color(hex: $0) }
+        if list.count > Self.maxColors {
+            list = Array(list.prefix(Self.maxColors))
+        } else if list.count < Self.maxColors {
+            list.append(contentsOf: Self.defaultColors[list.count...])
+        }
+        colors = list
+        let count = defaults.object(forKey: Self.countKey) as? Int ?? 4
+        colorCount = min(max(count, Self.minColors), Self.maxColors)
+        let strength = defaults.object(forKey: Self.intensityKey) as? Double ?? 1.0
+        intensity = min(max(strength, 0.0), 1.5)
+    }
+
+    /// The colours that are drawn.
+    var activeColors: [Color] {
+        Array(colors.prefix(min(max(colorCount, Self.minColors), colors.count)))
+    }
+
+    /// The name of the theme the colours are those of, or nil when they were picked by hand.
+    var presetName: String? {
+        let active = activeColors.map(\.hexString)
+        return Self.presets.first { $0.colors.map(\.hexString) == active }?.name
+    }
+
+    func apply(_ preset: Preset) {
+        var list = preset.colors
+        if list.count < Self.maxColors {
+            list.append(contentsOf: Self.defaultColors[list.count...])
+        }
+        colors = Array(list.prefix(Self.maxColors))
+        colorCount = min(max(preset.colors.count, Self.minColors), Self.maxColors)
+    }
+
+    func reset() {
+        colors = Self.defaultColors
+        colorCount = 4
+        intensity = 1.0
+    }
+}
+
+extension Color {
+    /// A colour from "RRGGBB" (the way the colours of the backdrop are stored).
+    init(hex: String) {
+        var text = hex.trimmingCharacters(in: .whitespaces)
+        if text.hasPrefix("#") {
+            text.removeFirst()
+        }
+        let value = Scanner(string: text).scanHexInt64() ?? 0
+        self.init(
+            red: Double((value >> 16) & 0xFF) / 255.0,
+            green: Double((value >> 8) & 0xFF) / 255.0,
+            blue: Double(value & 0xFF) / 255.0)
+    }
+
+    var hexString: String {
+        var r: CGFloat = 0, g: CGFloat = 0, b: CGFloat = 0, a: CGFloat = 0
+        UIColor(self).getRed(&r, green: &g, blue: &b, alpha: &a)
+        func byte(_ value: CGFloat) -> Int {
+            Int((min(max(value, 0), 1) * 255).rounded())
+        }
+        return String(format: "%02X%02X%02X", byte(r), byte(g), byte(b))
+    }
+}
+
+/// A soft, colourful ambient background that gives glass something to refract. Its colours are the player's
+/// (see `BackdropTheme`).
 struct YmirBackdrop: View {
+    /// Set for the preview in the settings: it stays inside its frame instead of covering the screen.
+    var isPreview = false
+
     @Environment(\.colorScheme) private var scheme
+    @ObservedObject private var theme = BackdropTheme.shared
+
+    /// Where the blobs sit, as fractions of the width and the height. The first ones are where they have always been.
+    private static let placements: [(size: CGFloat, x: CGFloat, y: CGFloat)] = [
+        (0.90, -0.25, -0.18),
+        (0.80, 0.35, 0.05),
+        (0.85, -0.30, 0.28),
+        (0.70, 0.30, 0.42),
+        (0.75, 0.05, -0.45),
+    ]
 
     var body: some View {
         GeometryReader { geo in
@@ -284,20 +412,20 @@ struct YmirBackdrop: View {
             let h = geo.size.height
             ZStack {
                 (scheme == .dark ? Color(red: 0.04, green: 0.04, blue: 0.12) : Color(red: 0.93, green: 0.94, blue: 1.0))
-                blob(.indigo, size: w * 0.9, x: -w * 0.25, y: -h * 0.18)
-                blob(.pink, size: w * 0.8, x: w * 0.35, y: h * 0.05)
-                blob(.cyan, size: w * 0.85, x: -w * 0.3, y: h * 0.28)
-                blob(.orange, size: w * 0.7, x: w * 0.3, y: h * 0.42)
+                ForEach(Array(theme.activeColors.enumerated()), id: \.offset) { index, color in
+                    let spot = Self.placements[index % Self.placements.count]
+                    blob(color, size: w * spot.size, x: w * spot.x, y: h * spot.y)
+                }
             }
             .frame(width: w, height: h)
         }
-        .ignoresSafeArea()
+        .ignoresSafeArea(edges: isPreview ? [] : .all)
         .allowsHitTesting(false)
     }
 
     private func blob(_ color: Color, size: CGFloat, x: CGFloat, y: CGFloat) -> some View {
         Circle()
-            .fill(color.opacity(scheme == .dark ? 0.45 : 0.35))
+            .fill(color.opacity((scheme == .dark ? 0.45 : 0.35) * theme.intensity))
             .frame(width: size, height: size)
             .blur(radius: 70)
             .offset(x: x, y: y)
