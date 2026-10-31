@@ -59,6 +59,73 @@ extension View {
     }
 }
 
+// MARK: - Glass forms
+
+/// The rows of a glass form section: translucent, so that the backdrop shows through.
+struct GlassRowBackground: View {
+    var body: some View {
+        Rectangle().fill(.ultraThinMaterial)
+    }
+}
+
+/// A `Section` for forms and lists whose rows sit on translucent glass over the app's backdrop, in the style of the
+/// cards of the settings home. Used like `Section`.
+struct GlassSection<Content: View, Header: View, Footer: View>: View {
+    private let content: Content
+    private let header: Header
+    private let footer: Footer
+
+    init(@ViewBuilder content: () -> Content, @ViewBuilder header: () -> Header, @ViewBuilder footer: () -> Footer) {
+        self.content = content()
+        self.header = header()
+        self.footer = footer()
+    }
+
+    var body: some View {
+        Section {
+            content
+        } header: {
+            header
+        } footer: {
+            footer
+        }
+        .listRowBackground(GlassRowBackground())
+    }
+}
+
+extension GlassSection where Header == EmptyView, Footer == EmptyView {
+    init(@ViewBuilder content: () -> Content) {
+        self.init(content: content, header: { EmptyView() }, footer: { EmptyView() })
+    }
+}
+
+extension GlassSection where Footer == EmptyView {
+    init(@ViewBuilder content: () -> Content, @ViewBuilder header: () -> Header) {
+        self.init(content: content, header: header, footer: { EmptyView() })
+    }
+}
+
+extension GlassSection where Header == EmptyView {
+    init(@ViewBuilder content: () -> Content, @ViewBuilder footer: () -> Footer) {
+        self.init(content: content, header: { EmptyView() }, footer: footer)
+    }
+}
+
+extension GlassSection where Header == Text, Footer == EmptyView {
+    init(_ title: String, @ViewBuilder content: () -> Content) {
+        self.init(content: content, header: { Text(title) }, footer: { EmptyView() })
+    }
+}
+
+extension View {
+    /// Shows a form or list on the app's backdrop instead of the plain grouped background (see `GlassSection`).
+    func ymirGlassForm() -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .background(YmirBackdrop())
+    }
+}
+
 // MARK: - Backdrop
 
 /// A soft, colourful ambient background that gives glass something to refract.

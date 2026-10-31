@@ -215,6 +215,7 @@ private struct SettingsGroup<Content: View>: View {
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
                     .padding(.leading, 16)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             VStack(spacing: 0) {
                 content()
@@ -225,8 +226,10 @@ private struct SettingsGroup<Content: View>: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 16)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -283,6 +286,9 @@ struct SettingsView: View {
     }
 
     var body: some View {
+        // The width is measured and given to the content: in portrait the cards came out as wide as the longest line of
+        // text (about one and a half screens), because the texts weren't made to wrap
+        GeometryReader { geo in
         ScrollView {
             VStack(spacing: 22) {
                 biosCard
@@ -364,9 +370,11 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .padding(.bottom, 8)
             }
-            .padding(.horizontal, 16)
+            .frame(width: max(0, geo.size.width - 32))
+            .frame(maxWidth: .infinity)
             .padding(.top, 8)
             .padding(.bottom, 24)
+        }
         }
         .background(YmirBackdrop())
         .onAppear {
@@ -403,6 +411,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(2)
                     .truncationMode(.middle)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Spacer(minLength: 8)
             Button(hasBIOS ? "Replace" : "Import") {
@@ -439,7 +448,7 @@ struct DisplaySettingsView: View {
 
     var body: some View {
         Form {
-            Section("Scaling") {
+            GlassSection("Scaling") {
                 Toggle("Stretch to Fill Screen", isOn: store.bool("video.forceStretch"))
                 SettingSlider(title: "Extra Portrait Height", value: store.float("video.portraitStretch", default: 0),
                               range: 0...1, format: percent)
@@ -463,7 +472,7 @@ struct DisplaySettingsView: View {
                 }
             }
 
-            Section {
+            GlassSection {
                 Picker("MetalFX", selection: store.int("video.upscaling")) {
                     Text("Off").tag(0)
                     Text("Spatial").tag(1)
@@ -476,7 +485,7 @@ struct DisplaySettingsView: View {
                 Text("MetalFX upscales the game's image with the GPU. Spatial works on each frame on its own and looks cleaner and sharper than plain scaling. Temporal also blends in previous frames for extra stability, but the Saturn's 2D video has no motion data, so fast movement can show slight ghosting.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Sharp Pixels", isOn: store.bool("video.sharpPixels"))
                 SettingSlider(title: "Sharpening", value: store.float("video.sharpness"), range: 0...1, format: percent)
                 SettingSlider(title: "Scanlines", value: store.float("video.scanlines"), range: 0...1, format: percent)
@@ -487,7 +496,7 @@ struct DisplaySettingsView: View {
                 Text("Sharp Pixels keeps every game pixel crisp and only smooths its edges, which looks better than plain smooth scaling. Sharpening adds crispness after upscaling. Scanlines and the aperture grille imitate a CRT TV; they look best on a high resolution screen like yours.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Metal Renderer (Experimental)", isOn: store.bool("video.metalRenderer"))
                 Toggle("Draw Polygons and Sprites on GPU (Experimental)", isOn: store.bool("video.metalVDP1"))
                     .disabled(!store.bool("video.metalRenderer").wrappedValue)
@@ -499,7 +508,7 @@ struct DisplaySettingsView: View {
                 Text("The Metal renderer draws the Saturn's second video chip (backgrounds, the sprite layer and the final mix) with the GPU, which takes a lot of work off the processor and reduces heat. The second switch moves the first video chip (polygons, sprites and lines) to the GPU as well; it needs the Metal renderer. Direct Display hands the picture straight to the screen on the GPU instead of copying it through the processor, which is faster and saves a frame of delay; turn it off if the picture misbehaves. Internal Resolution, Transparent Meshes and Deinterlacing need the first two switches on.")
             }
 
-            Section {
+            GlassSection {
                 Picker("Internal Resolution", selection: store.int("video.internalResolution", default: 1)) {
                     Text("Native").tag(1)
                     Text("2×").tag(2)
@@ -513,7 +522,7 @@ struct DisplaySettingsView: View {
                 Text("Draws the game's 3D models, sprites and lines at several times the Saturn's own resolution, so their edges are smooth and detailed instead of blocky. Backgrounds drawn by the Saturn's second video chip stay at their original sharpness. Higher values need much more processing power. Modes that can't be enlarged (high resolution screens, interlaced video, 8-bit or rotated sprite buffers) are drawn at native resolution. Skip Native Drawing saves processing power by no longer drawing everything a second time at the original size; the original-size picture the game can read back is then copied from the enlarged one at the end of each frame, so games that read the picture while it is still being drawn may misbehave.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Deinterlacing", isOn: store.bool("video.deinterlace"))
                 Toggle("Transparent Meshes", isOn: store.bool("video.transparentMeshes"))
             } header: {
@@ -522,7 +531,7 @@ struct DisplaySettingsView: View {
                 Text("Deinterlacing smooths high resolution interlaced video. Transparent meshes replaces the checkerboard patterns games use for transparency with real transparency.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Video Sync", isOn: store.bool("video.sync", default: true))
                 Picker("Frame Pacing", selection: store.int("video.framePacing", default: 1)) {
                     Text("Exact Speed").tag(0)
@@ -542,6 +551,7 @@ struct DisplaySettingsView: View {
                 Text("Video sync paces emulation to the display. Frame Pacing picks how: Exact Speed runs the game at the Saturn's own rate (59.83 frames per second), so about every 6 seconds one frame stays on the screen twice as long. Match Display shows exactly one game frame per display refresh for the smoothest motion; the game and its sound then run 0.3% faster, which you can't hear. Frame Delay lowers input lag: Auto starts emulating each frame as late as the spare time allows (the phone usually finishes a frame in a third of the time it has), so the game reads your controls closer to when the picture is shown, up to 12 ms later. It backs off by itself in heavy scenes; turn it off if you see stutter. Use Full Refresh Rate does nothing with Match Display. Reduce Latency helps on displays with a low refresh rate.")
             }
         }
+        .ymirGlassForm()
         .navigationTitle("Display")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -554,12 +564,12 @@ struct AudioSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
+            GlassSection {
                 Toggle("Mute", isOn: store.bool("audio.mute"))
                 SettingSlider(title: "Volume", value: store.float("audio.volume", default: 1), range: 0...1, format: percent)
             }
 
-            Section {
+            GlassSection {
                 Picker("Interpolation", selection: store.int("audio.interpolation", default: 1)) {
                     Text("Nearest Neighbor").tag(0)
                     Text("Linear").tag(1)
@@ -576,6 +586,7 @@ struct AudioSettingsView: View {
                 Text("Linear interpolation matches the real SCSP. Higher step granularity is more accurate and slower.")
             }
         }
+        .ymirGlassForm()
         .navigationTitle("Audio")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -593,7 +604,7 @@ struct ControlsSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
+            GlassSection {
                 Toggle("On-Screen Controls", isOn: store.bool("touch.enabled", default: true))
                 Button {
                     YmirShell.beginTouchEditing()
@@ -608,7 +619,7 @@ struct ControlsSettingsView: View {
                 Text("MFi, Xbox, PlayStation and other Bluetooth controllers work automatically, using the default bindings. On-screen controls hide while a controller is connected. Press Select on a controller to open the menu.")
             }
 
-            Section {
+            GlassSection {
                 ForEach(1...2, id: \.self) { port in
                     Picker("Port \(port)", selection: store.int("input.port\(port)Type", default: port == 1 ? 1 : 0)) {
                         ForEach(Self.peripherals, id: \.0) { entry in
@@ -622,7 +633,7 @@ struct ControlsSettingsView: View {
                 Text("Touch controls and the default controller bindings drive the Saturn Control Pad on port 1.")
             }
 
-            Section {
+            GlassSection {
                 SettingSlider(title: "Left Stick Deadzone", value: store.float("input.lsDeadzone", default: 0.15),
                               range: 0.05...0.9, format: percent)
                 SettingSlider(title: "Right Stick Deadzone", value: store.float("input.rsDeadzone", default: 0.15),
@@ -635,6 +646,7 @@ struct ControlsSettingsView: View {
                 Text("The deadzone is the stick travel that is ignored. Analog to digital sensitivity is how far a stick must move to press a digital button.")
             }
         }
+        .ymirGlassForm()
         .navigationTitle("Controls")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -647,7 +659,7 @@ struct EmulationSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
+            GlassSection {
                 Toggle("Use Alternate Speed", isOn: store.bool("general.useAltSpeed"))
                 SettingSlider(title: "Primary Speed", value: store.float("general.speedMain", default: 1),
                               range: 0.1...5, step: 0.1, format: percent)
@@ -659,7 +671,7 @@ struct EmulationSettingsView: View {
                 Text("Switch between the two speeds to slow the game down or run it faster. Fast forward in the in-game menu ignores them.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Unpause After Loading a Game", isOn: store.bool("general.unpauseOnDiscLoad", default: true))
                 Toggle("Pause When Interrupted", isOn: store.bool("general.pauseWhenUnfocused", default: true))
                 Toggle("Autosave When Leaving a Game", isOn: store.bool("general.autoSaveState", default: true))
@@ -670,7 +682,7 @@ struct EmulationSettingsView: View {
                 Text("Pause When Interrupted pauses the game while something covers it (the control center, a notification, a call, the app switcher). Autosave keeps a state of the game in its own slot whenever you leave it: the app goes to the background, you close the game, or you start or load something else. Find it in Save States.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Rewind Buffer", isOn: store.bool("general.rewind"))
                 SettingSlider(title: "Compression", value: store.intSlider("general.rewindCompression"),
                               range: 0...16, step: 1, format: { String(format: "%.0f", $0) })
@@ -680,7 +692,7 @@ struct EmulationSettingsView: View {
                 Text("Lets you step back in time, at the cost of memory and some performance. Higher compression uses less memory but is slower.")
             }
 
-            Section {
+            GlassSection {
                 Stepper(
                     "Screenshot Scale: \(store.int("general.screenshotScale", default: 1).wrappedValue)×",
                     value: store.int("general.screenshotScale", default: 1),
@@ -692,6 +704,7 @@ struct EmulationSettingsView: View {
                 Text("Screenshots are saved in the Ymir folder under screenshots.")
             }
         }
+        .ymirGlassForm()
         .navigationTitle("Emulation")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -704,7 +717,7 @@ struct SystemSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
+            GlassSection {
                 Toggle("Autodetect Region from Games", isOn: store.bool("system.autodetectRegion", default: true))
                 Picker("Video Standard", selection: store.int("system.videoStandard")) {
                     Text("NTSC").tag(0)
@@ -723,7 +736,7 @@ struct SystemSettingsView: View {
                 Text("With autodetection on, the region and video standard follow the loaded game. Reset the console after changing them.")
             }
 
-            Section {
+            GlassSection {
                 Picker("Mode", selection: store.int("system.rtcMode")) {
                     Text("Host Clock").tag(0)
                     Text("Virtual").tag(1)
@@ -741,7 +754,7 @@ struct SystemSettingsView: View {
                 Text("The virtual clock is deterministic and only moves while the emulator runs.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Separate Backup Memory per Game", isOn: store.bool("system.backupRAMPerGame"))
             } header: {
                 Text("Saves")
@@ -749,6 +762,7 @@ struct SystemSettingsView: View {
                 Text("Creates an internal backup memory image for each game. Backup files are in the Ymir folder under backup.")
             }
         }
+        .ymirGlassForm()
         .navigationTitle("System & Region")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -761,13 +775,13 @@ struct CartridgeSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
+            GlassSection {
                 Toggle("Switch to Recommended Cartridges", isOn: store.bool("cartridge.autoLoad", default: true))
             } footer: {
                 Text("Automatically inserts the cartridge a game needs, such as a RAM expansion.")
             }
 
-            Section {
+            GlassSection {
                 Picker("Cartridge", selection: store.int("cartridge.type")) {
                     Text("None").tag(0)
                     Text("Backup RAM").tag(1)
@@ -803,6 +817,7 @@ struct CartridgeSettingsView: View {
                 Text("Chosen files are copied into the Ymir folder, under roms/cart and backup.")
             }
         }
+        .ymirGlassForm()
         .navigationTitle("Cartridge")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -815,14 +830,14 @@ struct CDBlockSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
+            GlassSection {
                 SettingSlider(title: "Read Speed", value: store.intSlider("cdblock.readSpeed", default: 2),
                               range: 2...200, step: 1, format: { String(format: "%.0f×", $0) })
             } footer: {
                 Text("The maximum read speed of the emulated drive. 2× is how fast a real Saturn reads discs.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Low Level Emulation", isOn: store.bool("cdblock.useLLE"))
                 FileSettingRow(title: "CD Block ROM", key: "cdblock.romPath",
                                folder: AppPaths.documents.appendingPathComponent("roms/cdb", isDirectory: true))
@@ -832,6 +847,7 @@ struct CDBlockSettingsView: View {
                 Text("Emulates the CD block's own CPU. Needs a CD block ROM image, and is much slower.")
             }
         }
+        .ymirGlassForm()
         .navigationTitle("CD Drive")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -847,7 +863,7 @@ struct PerformanceSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
+            GlassSection {
                 Button("Recommended") {
                     PerformanceProfile.balanced.apply(to: store)
                 }
@@ -863,7 +879,7 @@ struct PerformanceSettingsView: View {
                 Text("Presets change the options below, the sound chip settings in Audio and, in Display, Frame Pacing and Frame Delay: Recommended and Best Performance use Match Display and Auto with the sound chip on its own thread; Best Accuracy keeps the Saturn's exact speed and no delay.")
             }
 
-            Section {
+            GlassSection {
                 Picker("CPU Execution", selection: store.bool("system.useRecompiler")) {
                     Text("Interpreter").tag(false)
                     Text("Recompiler (JIT)").tag(true)
@@ -903,7 +919,7 @@ struct PerformanceSettingsView: View {
                 Text(recompilerFooter)
             }
 
-            Section {
+            GlassSection {
                 Toggle("Emulate SH-2 Cache", isOn: store.bool("system.emulateSH2Cache"))
                 SettingSlider(title: "SH-2 Clock", value: store.intSlider("system.sh2ClockFactor", default: 100),
                               range: 25...500, step: 5, format: { String(format: "%.0f%%", $0) })
@@ -916,7 +932,7 @@ struct PerformanceSettingsView: View {
                 Text("A few games need the SH-2 cache. Changing the clock may break games, desync audio or cause crashes: above 100% reduces slowdowns, below 100% helps slower devices.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Threaded VDP1", isOn: store.bool("video.threadedVDP1", default: true))
                 Toggle("Threaded VDP2", isOn: store.bool("video.threadedVDP2", default: true))
                 Toggle("Threaded Deinterlacer", isOn: store.bool("video.threadedDeinterlacer", default: true))
@@ -927,13 +943,13 @@ struct PerformanceSettingsView: View {
                 Text("Spreads emulation over several CPU cores for speed.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Boost Emulator Thread Priority", isOn: store.bool("general.boostEmuThread"))
             } footer: {
                 Text("May reduce stuttering, at the cost of more battery use.")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Performance Log", isOn: store.bool("general.performanceLog"))
             } header: {
                 Text("Diagnostics")
@@ -941,6 +957,7 @@ struct PerformanceSettingsView: View {
                 Text("Measures every frame in detail (frame times, CPU time per thread, GPU time, when frames reach the screen) and writes it to metal-vdp-log.txt in the app's Documents folder every 5 seconds. Nothing is logged while it is off. Leave it off for normal play: measuring costs a little time and battery. Turn it on before the session you want a log of, when sending logs.")
             }
         }
+        .ymirGlassForm()
         .navigationTitle("Advanced")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { refreshJIT() }
@@ -992,7 +1009,7 @@ struct InterfaceSettingsView: View {
 
     var body: some View {
         Form {
-            Section {
+            GlassSection {
                 Toggle("Show Frame Rate", isOn: store.bool("gui.showFrameRate"))
                 Picker("Position", selection: store.int("gui.frameRatePosition")) {
                     Text("Top Left").tag(0)
@@ -1005,13 +1022,14 @@ struct InterfaceSettingsView: View {
                 Text("Frame Rate")
             }
 
-            Section {
+            GlassSection {
                 Toggle("Show Messages", isOn: store.bool("gui.showMessages", default: true))
                 Toggle("Always Show Speed Indicator", isOn: store.bool("gui.showSpeedIndicator"))
             } header: {
                 Text("On-Screen Display")
             }
         }
+        .ymirGlassForm()
         .navigationTitle("Interface")
         .navigationBarTitleDisplayMode(.inline)
     }

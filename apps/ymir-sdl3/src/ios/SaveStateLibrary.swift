@@ -240,14 +240,14 @@ struct SaveStateManagerView: View {
     var body: some View {
         List {
             if saved.isEmpty {
-                Section {
+                GlassSection {
                     Text(loaded ? "No save states yet. Save one from the in-game menu and it shows up here." : "")
                         .foregroundStyle(.secondary)
                 }
             }
 
             ForEach(saved) { entry in
-                Section {
+                GlassSection {
                     ForEach(entry.slots) { slot in
                         HStack {
                             SlotThumbnail(url: slot.thumbnailURL)
@@ -314,12 +314,13 @@ struct SaveStateManagerView: View {
             }
 
             if !saved.isEmpty {
-                Section {
+                GlassSection {
                 } footer: {
                     Text("Load starts the game and continues from the state. Save states are stored per game in the savestates folder, which is visible in the Files app. Export shares a copy, for example to Files or AirDrop.")
                 }
             }
         }
+        .ymirGlassForm()
         .navigationTitle("Save States")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { reload() }

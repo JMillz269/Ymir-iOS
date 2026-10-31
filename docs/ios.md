@@ -28,7 +28,7 @@ The iOS app has a native SwiftUI interface (sources in `apps/ymir-sdl3/src/ios`)
 - **Settings > Display > Stretch to Fill Screen** fills the whole display with the game picture, ignoring the aspect ratio and integer scaling. In portrait the picture fills the width, is scaled by the same factor vertically, and sits at the top of the screen; the *Extra Portrait Height* slider stretches it further down.
 - **Settings > Display > MetalFX** upscales the picture with the GPU: *Spatial* works frame by frame, *Temporal* also reuses previous frames (the Saturn has no motion vectors, so it supplies none and fast movement can ghost slightly).
 - **Settings > Display > Picture Filters** adds *Sharp Pixels* (crisp pixel edges), *Sharpening*, *Scanlines* and an *Aperture Grille* (CRT look). They are applied after MetalFX in a custom Metal shader.
-- On iOS 26 and later the tab bar and the buttons use Liquid Glass; older systems get translucent materials.
+- On iOS 26 and later the tab bar and the buttons use Liquid Glass; older systems get translucent materials. The settings home is a stack of glass cards on a soft colourful backdrop; the settings pages and the Save States manager are forms on the same backdrop, whose sections (`GlassSection` in `Theme.swift`, used like `Section`) are translucent glass.
 
 Import a BIOS first (Games tab banner or Settings > System). Files can also be copied by hand into `roms/ipl` and `games` with the Files app, or shared to Ymir with **Open in...**. Pick every file of a multi-file image (e.g. the `.cue` and all `.bin` files) at once so they end up side by side; `.chd` and `.iso` images are single files and avoid this.
 
