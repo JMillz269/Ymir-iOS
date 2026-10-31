@@ -142,7 +142,7 @@ When the app is run inside another app (LiveContainer), the system goes by that 
 
 The detailed measurements (frame and CPU times, time per thread, GPU time, the scaled up image counts, when frames reach
 the screen, FBRAM downloads) are only taken and written to `metal-vdp-log.txt` while Performance Log (Performance
-settings) is on. Creating and releasing renderers and other events are always written.
+settings) is on. While it is off nothing is written to the log at all, and no log file is made.
 
 Diagnostics: the Metal renderer writes `metal-vdp-log.txt` to the Documents folder (started anew at every launch).
 Creating a folder named `metal-vdp-compare` there makes the software renderer draw VDP1 as well, and the log then lists

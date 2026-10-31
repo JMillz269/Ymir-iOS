@@ -226,6 +226,10 @@ namespace {
 } // namespace
 
 void LogMessage(const char *format, ...) {
+    // Nothing is logged (and no file is made) unless the performance log is on
+    if (!ymir::perf::detailedLog.load(std::memory_order_relaxed)) {
+        return;
+    }
     static std::mutex mutex;
     static FILE *file = nullptr;
     static bool opened = false;

@@ -19,8 +19,9 @@ submitted after it and not for those before it. Data passed by pointer is copied
 
 namespace ymir::vdp::metal {
 
-/// @brief Appends a line to the log of the Metal renderer (`metal-vdp-log.txt` in the Documents folder on iOS). The
-/// log is started anew every time the app runs and stops growing after a while.
+/// @brief Appends a line to the log of the Metal renderer (`metal-vdp-log.txt` in the Documents folder on iOS), if the
+/// performance log is on (`perf::detailedLog`); otherwise it does nothing. The log is started anew every time the app
+/// runs, and kept in two files that roll over.
 void LogMessage(const char *format, ...) __attribute__((format(printf, 1, 2)));
 
 /// @brief Whether a file or folder with the given name exists in the Documents folder. Used to turn diagnostics on.

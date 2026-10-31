@@ -744,7 +744,7 @@ struct PerformanceSettingsView: View {
             } header: {
                 Text("Diagnostics")
             } footer: {
-                Text("Measures every frame in detail (frame times, CPU time per thread, GPU time, when frames reach the screen) and writes it to metal-vdp-log.txt in the app's Documents folder every 5 seconds. Leave it off for normal play: measuring costs a little time and battery. Turn it on when sending logs.")
+                Text("Measures every frame in detail (frame times, CPU time per thread, GPU time, when frames reach the screen) and writes it to metal-vdp-log.txt in the app's Documents folder every 5 seconds. Nothing is logged while it is off. Leave it off for normal play: measuring costs a little time and battery. Turn it on before the session you want a log of, when sending logs.")
             }
         }
         .navigationTitle("Performance")
