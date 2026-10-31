@@ -203,6 +203,8 @@ private struct SettingsRowDivider: View {
 
 /// A titled group of rows on one Liquid Glass card, with an optional footnote underneath.
 private struct SettingsGroup<Content: View>: View {
+    // (not private: that would make the memberwise initializer private too)
+    @Environment(\.glassContentWidth) var width
     var title: String?
     var footer: String?
     @ViewBuilder let content: () -> Content
@@ -214,22 +216,25 @@ private struct SettingsGroup<Content: View>: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .textCase(.uppercase)
-                    .padding(.leading, 16)
+                    .frame(width: max(0, width - 32), alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 16)
             }
             VStack(spacing: 0) {
                 content()
             }
+            .frame(width: width)
             .ymirGlassCard()
             if let footer {
                 Text(footer)
                     .font(.footnote)
                     .foregroundStyle(.secondary)
-                    .padding(.horizontal, 16)
+                    .frame(width: max(0, width - 32), alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 16)
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(width: width, alignment: .leading)
     }
 }
 
@@ -289,9 +294,10 @@ struct SettingsView: View {
         // The width is measured and given to the content: in portrait the cards came out as wide as the longest line of
         // text (about one and a half screens), because the texts weren't made to wrap
         GeometryReader { geo in
+        let width = max(0, geo.size.width - 32)
         ScrollView {
             VStack(spacing: 22) {
-                biosCard
+                biosCard(width: width)
 
                 SettingsGroup(
                     title: "Performance profile",
@@ -370,7 +376,8 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .padding(.bottom, 8)
             }
-            .frame(width: max(0, geo.size.width - 32))
+            .environment(\.glassContentWidth, width)
+            .frame(width: width)
             .frame(maxWidth: .infinity)
             .padding(.top, 8)
             .padding(.bottom, 24)
@@ -400,7 +407,7 @@ struct SettingsView: View {
     }
 
     /// The BIOS is the one thing the app can't run without, so its state sits on top as a status card.
-    private var biosCard: some View {
+    private func biosCard(width: CGFloat) -> some View {
         HStack(spacing: 12) {
             SettingsIcon(systemName: "cpu", tint: hasBIOS ? .green : .orange, size: 40)
             VStack(alignment: .leading, spacing: 2) {
@@ -419,8 +426,10 @@ struct SettingsView: View {
             }
             .ymirSecondaryButton()
             .controlSize(.small)
+            .fixedSize()
         }
         .padding(14)
+        .frame(width: width)
         .ymirGlassCard()
     }
 
@@ -447,7 +456,7 @@ struct DisplaySettingsView: View {
     @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
-        Form {
+        GlassForm {
             GlassSection("Scaling") {
                 Toggle("Stretch to Fill Screen", isOn: store.bool("video.forceStretch"))
                 SettingSlider(title: "Extra Portrait Height", value: store.float("video.portraitStretch", default: 0),
@@ -456,7 +465,7 @@ struct DisplaySettingsView: View {
                 Toggle("Integer Scaling", isOn: store.bool("video.forceIntegerScaling"))
                     .disabled(YmirHost.boolValue(key: "video.forceStretch", default: false))
                 Toggle("Force Aspect Ratio", isOn: store.bool("video.forceAspectRatio", default: true))
-                Picker("Aspect Ratio", selection: store.int("video.aspect")) {
+                GlassPicker("Aspect Ratio", selection: store.int("video.aspect")) {
                     Text("4:3").tag(0)
                     Text("3:2").tag(1)
                     Text("16:10").tag(2)
@@ -464,7 +473,7 @@ struct DisplaySettingsView: View {
                 }
                 .disabled(!YmirHost.boolValue(key: "video.forceAspectRatio", default: true)
                     || YmirHost.boolValue(key: "video.forceStretch", default: false))
-                Picker("Rotation", selection: store.int("video.rotation")) {
+                GlassPicker("Rotation", selection: store.int("video.rotation")) {
                     Text("None").tag(0)
                     Text("90° Clockwise").tag(1)
                     Text("180°").tag(2)
@@ -473,7 +482,7 @@ struct DisplaySettingsView: View {
             }
 
             GlassSection {
-                Picker("MetalFX", selection: store.int("video.upscaling")) {
+                GlassPicker("MetalFX", selection: store.int("video.upscaling")) {
                     Text("Off").tag(0)
                     Text("Spatial").tag(1)
                     Text("Temporal").tag(2)
@@ -509,7 +518,7 @@ struct DisplaySettingsView: View {
             }
 
             GlassSection {
-                Picker("Internal Resolution", selection: store.int("video.internalResolution", default: 1)) {
+                GlassPicker("Internal Resolution", selection: store.int("video.internalResolution", default: 1)) {
                     Text("Native").tag(1)
                     Text("2×").tag(2)
                     Text("3×").tag(3)
@@ -533,12 +542,12 @@ struct DisplaySettingsView: View {
 
             GlassSection {
                 Toggle("Video Sync", isOn: store.bool("video.sync", default: true))
-                Picker("Frame Pacing", selection: store.int("video.framePacing", default: 1)) {
+                GlassPicker("Frame Pacing", selection: store.int("video.framePacing", default: 1)) {
                     Text("Exact Speed").tag(0)
                     Text("Match Display").tag(1)
                 }
                 .disabled(!store.bool("video.sync", default: true).wrappedValue)
-                Picker("Frame Delay", selection: store.int("video.frameDelay")) {
+                GlassPicker("Frame Delay", selection: store.int("video.frameDelay")) {
                     Text("Off").tag(0)
                     Text("Auto").tag(1)
                 }
@@ -551,7 +560,6 @@ struct DisplaySettingsView: View {
                 Text("Video sync paces emulation to the display. Frame Pacing picks how: Exact Speed runs the game at the Saturn's own rate (59.83 frames per second), so about every 6 seconds one frame stays on the screen twice as long. Match Display shows exactly one game frame per display refresh for the smoothest motion; the game and its sound then run 0.3% faster, which you can't hear. Frame Delay lowers input lag: Auto starts emulating each frame as late as the spare time allows (the phone usually finishes a frame in a third of the time it has), so the game reads your controls closer to when the picture is shown, up to 12 ms later. It backs off by itself in heavy scenes; turn it off if you see stutter. Use Full Refresh Rate does nothing with Match Display. Reduce Latency helps on displays with a low refresh rate.")
             }
         }
-        .ymirGlassForm()
         .navigationTitle("Display")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -563,14 +571,14 @@ struct AudioSettingsView: View {
     @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
-        Form {
+        GlassForm {
             GlassSection {
                 Toggle("Mute", isOn: store.bool("audio.mute"))
                 SettingSlider(title: "Volume", value: store.float("audio.volume", default: 1), range: 0...1, format: percent)
             }
 
             GlassSection {
-                Picker("Interpolation", selection: store.int("audio.interpolation", default: 1)) {
+                GlassPicker("Interpolation", selection: store.int("audio.interpolation", default: 1)) {
                     Text("Nearest Neighbor").tag(0)
                     Text("Linear").tag(1)
                 }
@@ -586,7 +594,6 @@ struct AudioSettingsView: View {
                 Text("Linear interpolation matches the real SCSP. Higher step granularity is more accurate and slower.")
             }
         }
-        .ymirGlassForm()
         .navigationTitle("Audio")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -603,7 +610,7 @@ struct ControlsSettingsView: View {
     ]
 
     var body: some View {
-        Form {
+        GlassForm {
             GlassSection {
                 Toggle("On-Screen Controls", isOn: store.bool("touch.enabled", default: true))
                 Button {
@@ -621,7 +628,7 @@ struct ControlsSettingsView: View {
 
             GlassSection {
                 ForEach(1...2, id: \.self) { port in
-                    Picker("Port \(port)", selection: store.int("input.port\(port)Type", default: port == 1 ? 1 : 0)) {
+                    GlassPicker("Port \(port)", selection: store.int("input.port\(port)Type", default: port == 1 ? 1 : 0)) {
                         ForEach(Self.peripherals, id: \.0) { entry in
                             Text(entry.1).tag(entry.0)
                         }
@@ -646,7 +653,6 @@ struct ControlsSettingsView: View {
                 Text("The deadzone is the stick travel that is ignored. Analog to digital sensitivity is how far a stick must move to press a digital button.")
             }
         }
-        .ymirGlassForm()
         .navigationTitle("Controls")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -658,7 +664,7 @@ struct EmulationSettingsView: View {
     @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
-        Form {
+        GlassForm {
             GlassSection {
                 Toggle("Use Alternate Speed", isOn: store.bool("general.useAltSpeed"))
                 SettingSlider(title: "Primary Speed", value: store.float("general.speedMain", default: 1),
@@ -704,7 +710,6 @@ struct EmulationSettingsView: View {
                 Text("Screenshots are saved in the Ymir folder under screenshots.")
             }
         }
-        .ymirGlassForm()
         .navigationTitle("Emulation")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -716,14 +721,14 @@ struct SystemSettingsView: View {
     @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
-        Form {
+        GlassForm {
             GlassSection {
                 Toggle("Autodetect Region from Games", isOn: store.bool("system.autodetectRegion", default: true))
-                Picker("Video Standard", selection: store.int("system.videoStandard")) {
+                GlassPicker("Video Standard", selection: store.int("system.videoStandard")) {
                     Text("NTSC").tag(0)
                     Text("PAL").tag(1)
                 }
-                Picker("Preferred BIOS", selection: store.int("system.iplVariant")) {
+                GlassPicker("Preferred BIOS", selection: store.int("system.iplVariant")) {
                     Text("Any").tag(0)
                     Text("Saturn").tag(1)
                     Text("Hi-Saturn").tag(2)
@@ -737,12 +742,12 @@ struct SystemSettingsView: View {
             }
 
             GlassSection {
-                Picker("Mode", selection: store.int("system.rtcMode")) {
+                GlassPicker("Mode", selection: store.int("system.rtcMode")) {
                     Text("Host Clock").tag(0)
                     Text("Virtual").tag(1)
                 }
                 if store.int("system.rtcMode").wrappedValue == 1 {
-                    Picker("On Hard Reset", selection: store.int("system.rtcResetStrategy")) {
+                    GlassPicker("On Hard Reset", selection: store.int("system.rtcResetStrategy")) {
                         Text("Sync to Host").tag(0)
                         Text("Reset to Fixed Time").tag(1)
                         Text("Preserve").tag(2)
@@ -762,7 +767,6 @@ struct SystemSettingsView: View {
                 Text("Creates an internal backup memory image for each game. Backup files are in the Ymir folder under backup.")
             }
         }
-        .ymirGlassForm()
         .navigationTitle("System & Region")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -774,7 +778,7 @@ struct CartridgeSettingsView: View {
     @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
-        Form {
+        GlassForm {
             GlassSection {
                 Toggle("Switch to Recommended Cartridges", isOn: store.bool("cartridge.autoLoad", default: true))
             } footer: {
@@ -782,7 +786,7 @@ struct CartridgeSettingsView: View {
             }
 
             GlassSection {
-                Picker("Cartridge", selection: store.int("cartridge.type")) {
+                GlassPicker("Cartridge", selection: store.int("cartridge.type")) {
                     Text("None").tag(0)
                     Text("Backup RAM").tag(1)
                     Text("DRAM Expansion").tag(2)
@@ -791,7 +795,7 @@ struct CartridgeSettingsView: View {
 
                 switch store.int("cartridge.type").wrappedValue {
                 case 1:
-                    Picker("Capacity", selection: store.int("cartridge.backupCapacity")) {
+                    GlassPicker("Capacity", selection: store.int("cartridge.backupCapacity")) {
                         Text("4 Mbit").tag(0)
                         Text("8 Mbit").tag(1)
                         Text("16 Mbit").tag(2)
@@ -800,7 +804,7 @@ struct CartridgeSettingsView: View {
                     FileSettingRow(title: "Image", key: "cartridge.backupPath",
                                    folder: AppPaths.documents.appendingPathComponent("backup", isDirectory: true))
                 case 2:
-                    Picker("Capacity", selection: store.int("cartridge.dramCapacity")) {
+                    GlassPicker("Capacity", selection: store.int("cartridge.dramCapacity")) {
                         Text("48 Mbit").tag(0)
                         Text("32 Mbit").tag(1)
                         Text("8 Mbit").tag(2)
@@ -817,7 +821,6 @@ struct CartridgeSettingsView: View {
                 Text("Chosen files are copied into the Ymir folder, under roms/cart and backup.")
             }
         }
-        .ymirGlassForm()
         .navigationTitle("Cartridge")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -829,7 +832,7 @@ struct CDBlockSettingsView: View {
     @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
-        Form {
+        GlassForm {
             GlassSection {
                 SettingSlider(title: "Read Speed", value: store.intSlider("cdblock.readSpeed", default: 2),
                               range: 2...200, step: 1, format: { String(format: "%.0f×", $0) })
@@ -847,7 +850,6 @@ struct CDBlockSettingsView: View {
                 Text("Emulates the CD block's own CPU. Needs a CD block ROM image, and is much slower.")
             }
         }
-        .ymirGlassForm()
         .navigationTitle("CD Drive")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -862,7 +864,7 @@ struct PerformanceSettingsView: View {
     @State private var jitReport = YmirHost.jitReport
 
     var body: some View {
-        Form {
+        GlassForm {
             GlassSection {
                 Button("Recommended") {
                     PerformanceProfile.balanced.apply(to: store)
@@ -880,7 +882,7 @@ struct PerformanceSettingsView: View {
             }
 
             GlassSection {
-                Picker("CPU Execution", selection: store.bool("system.useRecompiler")) {
+                GlassPicker("CPU Execution", selection: store.bool("system.useRecompiler")) {
                     Text("Interpreter").tag(false)
                     Text("Recompiler (JIT)").tag(true)
                 }
@@ -957,7 +959,6 @@ struct PerformanceSettingsView: View {
                 Text("Measures every frame in detail (frame times, CPU time per thread, GPU time, when frames reach the screen) and writes it to metal-vdp-log.txt in the app's Documents folder every 5 seconds. Nothing is logged while it is off. Leave it off for normal play: measuring costs a little time and battery. Turn it on before the session you want a log of, when sending logs.")
             }
         }
-        .ymirGlassForm()
         .navigationTitle("Advanced")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { refreshJIT() }
@@ -1008,10 +1009,10 @@ struct InterfaceSettingsView: View {
     @ObservedObject private var store = SettingStore.shared
 
     var body: some View {
-        Form {
+        GlassForm {
             GlassSection {
                 Toggle("Show Frame Rate", isOn: store.bool("gui.showFrameRate"))
-                Picker("Position", selection: store.int("gui.frameRatePosition")) {
+                GlassPicker("Position", selection: store.int("gui.frameRatePosition")) {
                     Text("Top Left").tag(0)
                     Text("Top Right").tag(1)
                     Text("Bottom Left").tag(2)
@@ -1029,7 +1030,6 @@ struct InterfaceSettingsView: View {
                 Text("On-Screen Display")
             }
         }
-        .ymirGlassForm()
         .navigationTitle("Interface")
         .navigationBarTitleDisplayMode(.inline)
     }
@@ -1054,18 +1054,20 @@ private struct FileSettingRow: View {
     }
 
     var body: some View {
-        HStack {
-            Text(title)
-            Spacer()
-            Text(name.isEmpty ? "None" : name)
-                .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
-        }
-        Button {
-            showImporter = true
-        } label: {
-            Label("Choose File…", systemImage: "doc.badge.plus")
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(name.isEmpty ? "None" : name)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Button {
+                showImporter = true
+            } label: {
+                Label("Choose File…", systemImage: "doc.badge.plus")
+            }
         }
         .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
             guard case .success(let urls) = result, let url = urls.first else { return }

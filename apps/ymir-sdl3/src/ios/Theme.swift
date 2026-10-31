@@ -61,35 +61,105 @@ extension View {
 
 // MARK: - Glass forms
 
-/// The rows of a glass form section: translucent, so that the backdrop shows through.
-struct GlassRowBackground: View {
-    var body: some View {
-        Rectangle().fill(.ultraThinMaterial)
+private struct GlassContentWidthKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 340
+}
+
+extension EnvironmentValues {
+    /// The width of the content of a glass form (the screen without its margins). The cards and the texts under and
+    /// over them are given exactly this width: letting them negotiate it made them as wide as their longest line.
+    var glassContentWidth: CGFloat {
+        get { self[GlassContentWidthKey.self] }
+        set { self[GlassContentWidthKey.self] = newValue }
     }
 }
 
-/// A `Section` for forms and lists whose rows sit on translucent glass over the app's backdrop, in the style of the
-/// cards of the settings home. Used like `Section`.
+/// A settings page: a scrolling stack of `GlassSection`s on the app's backdrop, like the settings home. Used like `Form`.
+struct GlassForm<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        GeometryReader { geo in
+            let width = max(0, geo.size.width - 32)
+            ScrollView {
+                VStack(spacing: 22) {
+                    content()
+                }
+                .environment(\.glassContentWidth, width)
+                .frame(width: width)
+                .frame(maxWidth: .infinity)
+                .padding(.top, 8)
+                .padding(.bottom, 24)
+            }
+        }
+        .background(YmirBackdrop())
+    }
+}
+
+/// Lays the rows of a glass section out with a divider between them.
+private struct GlassRows: _VariadicView_UnaryViewRoot {
+    @ViewBuilder
+    func body(children: _VariadicView.Children) -> some View {
+        let lastID = children.last?.id
+        VStack(spacing: 0) {
+            ForEach(children) { child in
+                child
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 11)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if child.id != lastID {
+                    Divider().padding(.leading, 16)
+                }
+            }
+        }
+    }
+}
+
+/// A titled group of rows on one Liquid Glass card, with an optional footnote underneath. Used like `Section`.
 struct GlassSection<Content: View, Header: View, Footer: View>: View {
+    @Environment(\.glassContentWidth) private var width
     private let content: Content
     private let header: Header
     private let footer: Footer
+    private let hasContent: Bool
+    private let hasHeader: Bool
+    private let hasFooter: Bool
 
     init(@ViewBuilder content: () -> Content, @ViewBuilder header: () -> Header, @ViewBuilder footer: () -> Footer) {
         self.content = content()
         self.header = header()
         self.footer = footer()
+        hasContent = Content.self != EmptyView.self
+        hasHeader = Header.self != EmptyView.self
+        hasFooter = Footer.self != EmptyView.self
     }
 
     var body: some View {
-        Section {
-            content
-        } header: {
-            header
-        } footer: {
-            footer
+        VStack(alignment: .leading, spacing: 6) {
+            if hasHeader {
+                header
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                    .frame(width: max(0, width - 32), alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 16)
+            }
+            if hasContent {
+                _VariadicView.Tree(GlassRows()) { content }
+                    .frame(width: width)
+                    .ymirGlassCard()
+            }
+            if hasFooter {
+                footer
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .frame(width: max(0, width - 32), alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 16)
+            }
         }
-        .listRowBackground(GlassRowBackground())
+        .frame(width: width, alignment: .leading)
     }
 }
 
@@ -117,12 +187,31 @@ extension GlassSection where Header == Text, Footer == EmptyView {
     }
 }
 
-extension View {
-    /// Shows a form or list on the app's backdrop instead of the plain grouped background (see `GlassSection`).
-    func ymirGlassForm() -> some View {
-        self
-            .scrollContentBackground(.hidden)
-            .background(YmirBackdrop())
+/// A picker row for glass forms: the title on the left and the choice, as a menu, on the right (a plain `Picker`
+/// outside a `Form` puts them next to each other).
+struct GlassPicker<SelectionValue: Hashable, Content: View>: View {
+    @Environment(\.isEnabled) private var isEnabled
+    private let title: String
+    private let selection: Binding<SelectionValue>
+    private let content: Content
+
+    init(_ title: String, selection: Binding<SelectionValue>, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.selection = selection
+        self.content = content()
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Text(title)
+                .foregroundStyle(isEnabled ? Color.primary : Color.secondary)
+            Spacer(minLength: 8)
+            Picker(title, selection: selection) {
+                content
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+        }
     }
 }
 

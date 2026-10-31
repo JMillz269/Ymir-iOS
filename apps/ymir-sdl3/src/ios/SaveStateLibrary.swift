@@ -238,7 +238,7 @@ struct SaveStateManagerView: View {
     }
 
     var body: some View {
-        List {
+        GlassForm {
             if saved.isEmpty {
                 GlassSection {
                     Text(loaded ? "No save states yet. Save one from the in-game menu and it shows up here." : "")
@@ -282,13 +282,6 @@ struct SaveStateManagerView: View {
                             .accessibilityLabel("More for \(entry.title), \(slot.title)")
                         }
                         .buttonStyle(.borderless)
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                pendingDelete = PendingDelete(slot: slot, game: entry)
-                            } label: {
-                                Label("Delete", systemImage: "trash")
-                            }
-                        }
                     }
                 } header: {
                     HStack {
@@ -320,7 +313,6 @@ struct SaveStateManagerView: View {
                 }
             }
         }
-        .ymirGlassForm()
         .navigationTitle("Save States")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { reload() }
