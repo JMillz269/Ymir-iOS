@@ -180,6 +180,9 @@ private:
     void MarkDirty();
     ImVec2 ElementCenter(int element) const;
     void ApplyState(const std::array<bool, _Count> &state);
+
+    // The controls a finger at this position is on (the D-pad directions included)
+    std::array<bool, _Count> ControlsAt(ImVec2 pos) const;
     void ReleaseAll();
     void DropEndedFingers();
 
@@ -215,6 +218,9 @@ private:
     std::chrono::steady_clock::time_point m_dirtyTime;
     std::unordered_map<SDL_FingerID, ImVec2> m_fingers;
     std::array<bool, _Count> m_state{};
+    // A control stays pressed until this time at least: the emulator reads the pad once per frame, so a tap shorter than
+    // that (or one whose press and release are both handled between two frames) would never be seen
+    std::array<std::chrono::steady_clock::time_point, _Count> m_holdUntil{};
 };
 
 } // namespace app::input

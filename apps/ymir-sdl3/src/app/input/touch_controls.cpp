@@ -19,6 +19,13 @@ namespace {
 
     constexpr uint32 kPlayerIndex = 0;
 
+    // The shortest time a control stays pressed. The emulator samples the pad once per frame (16.7 ms), later with
+    // Frame Delay, and the touch handling is on the GUI thread, which can run late on heavy frames.
+    constexpr std::chrono::milliseconds kMinHold{45};
+
+    // How far outside its drawn shape a button still counts as touched, as a fraction of its half height
+    constexpr float kButtonSlop = 0.4f;
+
     constexpr const char *kLabels[] = {"", "", "", "", "A", "B", "C", "X", "Y", "Z", "L", "R", "START", "MENU"};
 
     bool InsideEllipse(ImVec2 p, ImVec2 center, ImVec2 halfSize, float slop) {
@@ -69,9 +76,21 @@ void TouchControls::ProcessFingerEvent(const SDL_Event &evt, ImVec2 displaySize,
 
     switch (evt.type) {
     case SDL_EVENT_FINGER_DOWN:
-        // Don't steal touches from menus and windows
-        if (!imguiWantsPointer) {
-            m_fingers[finger.fingerID] = pos;
+        // Don't steal touches from menus and windows (but a touch on a control is the game's: an overlay of the emulator,
+        // the messages for example, must not make the control miss it)
+        {
+            const std::array<bool, _Count> hit = ControlsAt(pos);
+            const bool onControl = std::any_of(hit.begin(), hit.end(), [](bool b) { return b; });
+            if (!imguiWantsPointer || onControl) {
+                m_fingers[finger.fingerID] = pos;
+                // Even if the finger is lifted before the controls are updated, what it touched counts as pressed
+                const auto until = std::chrono::steady_clock::now() + kMinHold;
+                for (int c = 0; c < _Count; ++c) {
+                    if (hit[c]) {
+                        m_holdUntil[c] = std::max(m_holdUntil[c], until);
+                    }
+                }
+            }
         }
         break;
     case SDL_EVENT_FINGER_MOTION:
@@ -351,6 +370,7 @@ void TouchControls::SetStoragePath(std::filesystem::path path) {
 }
 
 void TouchControls::CancelTouches() {
+    m_holdUntil = {};
     if (m_fingers.empty()) {
         return;
     }
@@ -504,28 +524,49 @@ void TouchControls::Update(SDL_Window *window, ImVec2 displaySize) {
 
     std::array<bool, _Count> state{};
     for (const auto &[id, pos] : m_fingers) {
-        // D-pad: one finger drives up to two adjacent directions, so diagonals work and sliding feels natural
-        const float dx = pos.x - m_layout.dpadCenter.x;
-        const float dy = pos.y - m_layout.dpadCenter.y;
-        const float dist = std::sqrt(dx * dx + dy * dy);
-        if (dist <= m_layout.dpadRadius * 1.5f && dist >= m_layout.dpadRadius * 0.18f) {
-            // Inclusion threshold: sin(22.5deg) of the distance on the minor axis counts as a diagonal
-            const float t = dist * 0.38f;
-            state[Left] |= dx < -t;
-            state[Right] |= dx > t;
-            state[Up] |= dy < -t;
-            state[Down] |= dy > t;
-            continue;
+        const std::array<bool, _Count> hit = ControlsAt(pos);
+        for (int c = 0; c < _Count; ++c) {
+            state[c] |= hit[c];
         }
+    }
 
-        for (int c = A; c < _Count; ++c) {
-            if (InsideEllipse(pos, m_layout.centers[c], m_layout.halfSizes[c], m_layout.halfSizes[c].y * 0.3f)) {
-                state[c] = true;
-            }
+    // Hold every control for a minimum time from when it was pressed
+    const auto now = std::chrono::steady_clock::now();
+    for (int c = 0; c < _Count; ++c) {
+        if (state[c] && !m_state[c]) {
+            m_holdUntil[c] = std::max(m_holdUntil[c], now + kMinHold);
+        }
+        if (!state[c] && now < m_holdUntil[c]) {
+            state[c] = true;
         }
     }
 
     ApplyState(state);
+}
+
+std::array<bool, TouchControls::_Count> TouchControls::ControlsAt(ImVec2 pos) const {
+    std::array<bool, _Count> state{};
+
+    // D-pad: one finger drives up to two adjacent directions, so diagonals work and sliding feels natural
+    const float dx = pos.x - m_layout.dpadCenter.x;
+    const float dy = pos.y - m_layout.dpadCenter.y;
+    const float dist = std::sqrt(dx * dx + dy * dy);
+    if (dist <= m_layout.dpadRadius * 1.5f && dist >= m_layout.dpadRadius * 0.18f) {
+        // Inclusion threshold: sin(22.5deg) of the distance on the minor axis counts as a diagonal
+        const float t = dist * 0.38f;
+        state[Left] = dx < -t;
+        state[Right] = dx > t;
+        state[Up] = dy < -t;
+        state[Down] = dy > t;
+        return state;
+    }
+
+    for (int c = A; c < _Count; ++c) {
+        if (InsideEllipse(pos, m_layout.centers[c], m_layout.halfSizes[c], m_layout.halfSizes[c].y * kButtonSlop)) {
+            state[c] = true;
+        }
+    }
+    return state;
 }
 
 void TouchControls::ApplyState(const std::array<bool, _Count> &state) {
