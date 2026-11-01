@@ -1,6 +1,7 @@
 #import "YmirHost.h"
 
 #import <AVFoundation/AVFoundation.h>
+#import <Metal/Metal.h>
 #import <QuartzCore/QuartzCore.h>
 
 #include <app/ios/host_interface.hpp>
@@ -30,6 +31,16 @@ static NSString *ToNSString(const std::filesystem::path &path) {
 /// Reacts to what the system does to the app: leaving the game when it's covered or sent to the background, and the
 /// sound going away from headphones.
 + (void)load {
+    // What the TXM detection of the JIT needs from the platform: the chip (from the name of the GPU) and the manual
+    // override. Set before anything probes the JIT.
+    @autoreleasepool {
+        id<MTLDevice> device = MTLCreateSystemDefaultDevice();
+        if (device != nil) {
+            ymir::jit::SetChipName(device.name.UTF8String);
+        }
+        ymir::jit::SetForceTxm([[NSUserDefaults standardUserDefaults] boolForKey:@"forceTXM"]);
+    }
+
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
 
     // The app is about to be covered or sent to the background (the control center, a call, the app switcher, the home

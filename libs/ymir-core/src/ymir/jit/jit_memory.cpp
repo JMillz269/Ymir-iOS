@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #if defined(__aarch64__) || defined(_M_ARM64)
     #define YMIR_JIT_ARCH_SUPPORTED 1
@@ -20,6 +22,7 @@
     #include <sys/sysctl.h>
     #include <sys/utsname.h>
     #include <unistd.h>
+    #include <dirent.h>
     #if TARGET_OS_IPHONE && !TARGET_OS_SIMULATOR
         #include <mach/mach.h>
         #include <mach/vm_map.h>
@@ -40,27 +43,31 @@ namespace ymir::jit {
 namespace {
 
     bool g_testingMode = false;
+    std::string g_chipName;
+    bool g_forceTxm = false;
 
 #if YMIR_JIT_IOS_DEVICE
     constexpr unsigned kCsOpsStatus = 0;
     constexpr unsigned kCsDebugged = 0x10000000;
 
-    // Same rules as StosDebug's ProcessInfo.detectedTXM, using only the hardware model and OS version so it works in a
-    // sandbox. Returns the major OS version through `osMajor`.
-    bool DeviceHasTXM() {
-        struct utsname info;
-        if (uname(&info) != 0) {
-            return false;
-        }
-        const char *hw = info.machine;
+    struct OsVersion {
+        int major = 0;
+        int minor = 0;
+    };
 
-        int osMajor = 0;
+    OsVersion GetOsVersion() {
+        OsVersion v;
         char version[64] = {};
         size_t versionLen = sizeof(version);
         if (sysctlbyname("kern.osproductversion", version, &versionLen, nullptr, 0) == 0) {
-            osMajor = std::atoi(version);
+            std::sscanf(version, "%d.%d", &v.major, &v.minor);
         }
+        return v;
+    }
 
+    // Same rules as StosDebug's ProcessInfo.detectedTXM, using only the hardware model and the OS version. Works
+    // without Metal, so it is the last resort.
+    bool ModelRuleHasTXM(const char *hw, int osMajor) {
         if (osMajor >= 27) {
             return std::strcmp(hw, "iPad8,11") != 0 && std::strcmp(hw, "iPad8,12") != 0;
         }
@@ -82,6 +89,124 @@ namespace {
             return isPad ? (hwVersion >= 14.5) : (hwVersion >= 14.2);
         }
         return false;
+    }
+
+    // The first entry of a directory whose name has the given length (the Preboot volume names are hashes).
+    std::string EntryWithLength(const std::string &dir, size_t length) {
+        std::string found;
+        if (DIR *d = opendir(dir.c_str())) {
+            while (const dirent *e = readdir(d)) {
+                if (std::strlen(e->d_name) == length) {
+                    found = dir + "/" + e->d_name;
+                    break;
+                }
+            }
+            closedir(d);
+        }
+        return found;
+    }
+
+    // The TXM image is present in the Preboot volume on TXM devices (the approach MeloCafe uses).
+    bool TxmFirmwarePresent() {
+        const char *img = "usr/standalone/firmware/FUD/Ap,TrustedExecutionMonitor.img4";
+        const std::string boot = EntryWithLength("/System/Volumes/Preboot", 36);
+        if (!boot.empty()) {
+            const std::string file = EntryWithLength(boot + "/boot", 96);
+            if (!file.empty()) {
+                return access((file + "/" + img).c_str(), F_OK) == 0;
+            }
+        }
+        const std::string file = EntryWithLength("/private/preboot", 96);
+        if (!file.empty()) {
+            return access((file + "/" + img).c_str(), F_OK) == 0;
+        }
+        return false;
+    }
+
+    // "Apple A15 GPU" -> ('A', 15). False if the name is unknown.
+    bool ChipInfo(char &letter, int &number) {
+        std::string name = g_chipName;
+        for (char &c : name) {
+            c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        }
+        const size_t pos = name.find("APPLE ");
+        if (pos == std::string::npos) {
+            return false;
+        }
+        char l = 0;
+        int n = 0;
+        if (std::sscanf(name.c_str() + pos, "APPLE %c%d", &l, &n) == 2 && (l == 'A' || l == 'M')) {
+            letter = l;
+            number = n;
+            return true;
+        }
+        return false;
+    }
+
+    // Decides whether the device has TXM, and says how in `info`. In order: a manual override, the TXM firmware image
+    // in Preboot, the chip generation (A15/M2 and newer on iOS 26.6, newer than the A12 on iOS 27), and finally the
+    // model identifier.
+    bool DetectTXM(std::string &info) {
+        struct utsname un;
+        if (uname(&un) != 0) {
+            info = "uname failed";
+            return false;
+        }
+        if (g_forceTxm) {
+            info = "forceTXM is set";
+            return true;
+        }
+        const OsVersion os = GetOsVersion();
+        char letter = 0;
+        int number = 0;
+        const bool haveChip = ChipInfo(letter, number);
+        const bool firmware = TxmFirmwarePresent();
+        const bool modelRule = ModelRuleHasTXM(un.machine, os.major);
+
+        bool result;
+        const char *why;
+        if (os.major >= 27) {
+            result = (haveChip && letter == 'A') ? number > 12 : modelRule || haveChip;
+            why = "iOS 27+: chip rule";
+        } else if (firmware) {
+            result = true;
+            why = "TrustedExecutionMonitor firmware found in Preboot";
+        } else if ((os.major > 26 || (os.major == 26 && os.minor >= 6)) && haveChip) {
+            result = (letter == 'M') ? number >= 2 : number >= 15;
+            why = "iOS 26.6+: chip rule (firmware not found)";
+        } else if (os.major >= 26) {
+            result = modelRule;
+            why = "model identifier rule (firmware not found)";
+        } else {
+            result = false;
+            why = "iOS older than 26";
+        }
+        char buffer[256];
+        std::snprintf(buffer, sizeof(buffer), "model=%s os=%d.%d chip=%c%d(valid=%d) firmware=%d modelRule=%d -> %s (%s)",
+                      un.machine, os.major, os.minor, haveChip ? letter : '?', number, static_cast<int>(haveChip),
+                      static_cast<int>(firmware), static_cast<int>(modelRule), result ? "TXM" : "no TXM", why);
+        info = buffer;
+        return result;
+    }
+
+    // Plain naked functions, with nothing from the compiler between the register setup and the brk: the JIT enabler's
+    // script (universal.js) reads x16 (the command) and x0/x1 (the arguments) when it stops on the brk, moves the pc
+    // past it and, for the prepare command, writes the address of the region into x0.
+    // Command 1 prepares a JIT region. With a NULL address the enabler allocates the region itself and returns it
+    // (NULL on failure); otherwise it prepares the existing mapping at `addr`.
+    __attribute__((noinline, optnone, naked)) void *TxmPrepareRegion(void *addr, size_t len) {
+        (void)addr;
+        (void)len;
+        __asm__ volatile("mov x16, #1\n"
+                         "brk #0xf00d\n"
+                         "ret");
+    }
+
+    // Command 0 detaches the debugger.
+    __attribute__((noinline, optnone, naked)) void TxmDetach() {
+        __asm__ volatile("mov x16, #0\n"
+                         "brk #0xf00d\n"
+                         "ret");
     }
 
     bool ProcessIsDebugged() {
@@ -108,6 +233,14 @@ namespace {
 } // namespace
 
 std::string JitStatus::Message() const {
+    std::string text = BaseMessage();
+    if (!txmDetection.empty()) {
+        text += "\nTXM detection: " + txmDetection;
+    }
+    return text;
+}
+
+std::string JitStatus::BaseMessage() const {
     switch (reason) {
     case Reason::Available: return txmDevice ? "Available (TXM mode)" : "Available";
     case Reason::UnsupportedArchitecture: return "Not supported on this device";
@@ -123,12 +256,23 @@ void SetJitTestingMode(bool enable) {
     g_testingMode = enable;
 }
 
+void SetChipName(const char *name) {
+    g_chipName = name != nullptr ? name : "";
+}
+
+void SetForceTxm(bool force) {
+    g_forceTxm = force;
+}
+
 JitStatus ProbeJit() {
     JitStatus status{};
 #if !YMIR_JIT_ARCH_SUPPORTED
     status.reason = g_testingMode ? JitStatus::Reason::Available : JitStatus::Reason::UnsupportedArchitecture;
 #elif YMIR_JIT_IOS_DEVICE
-    status.txmDevice = DeviceHasTXM();
+    static std::string detection;
+    static const bool txm = DetectTXM(detection);
+    status.txmDevice = txm;
+    status.txmDetection = detection;
     status.processDebugged = ProcessIsDebugged();
     status.reason = status.processDebugged ? JitStatus::Reason::Available : JitStatus::Reason::NeedsDebugger;
 #else
@@ -230,30 +374,27 @@ bool JitMemory::Initialize(size_t size) {
 
 bool JitMemory::InitializeTxmPool(size_t size) {
 #if YMIR_JIT_IOS_DEVICE
-    // 1. Reserve a read+execute region
-    void *rx = mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
-    if (rx == MAP_FAILED) {
-        return false;
+    // 1. Let the enabler allocate and prepare the read+execute region itself: with a NULL address it returns the region
+    // it prepared (the way MeloCafe does it). This also avoids handing it an address it can't handle.
+    void *rx = TxmPrepareRegion(nullptr, size);
+    if (rx == nullptr) {
+        // 2. The enabler didn't allocate one (an older script, say): reserve the region here and have it prepared.
+        rx = mmap(nullptr, size, PROT_READ | PROT_EXEC, MAP_ANON | MAP_PRIVATE, -1, 0);
+        if (rx == MAP_FAILED) {
+            return false;
+        }
+        // The enabler's prepare step only understands addresses below 2^36
+        if (reinterpret_cast<uintptr_t>(rx) + size > (1ull << 36)) {
+            std::fprintf(stderr, "[ymir-jit] TXM region %p is above 2^36; the JIT enabler may not prepare it\n", rx);
+        }
+        TxmPrepareRegion(rx, size);
     }
-    // The enabler's prepare step only understands addresses below 2^36
-    if (reinterpret_cast<uintptr_t>(rx) + size > (1ull << 36)) {
-        std::fprintf(stderr, "[ymir-jit] TXM region %p is above 2^36; the JIT enabler may not prepare it\n", rx);
-    }
-
-    // 2. Ask the enabler to prepare the region (universal script: x16 = 1, x0 = address, x1 = length)
-    __asm__ volatile("mov x0, %0\n"
-                     "mov x1, %1\n"
-                     "mov x16, #1\n"
-                     "brk #0xf00d"
-                     :
-                     : "r"(rx), "r"(size)
-                     : "x0", "x1", "x16", "memory");
 
     // 3. Map a writable alias of the same pages
     vm_address_t rw = 0;
     vm_prot_t curProt = 0, maxProt = 0;
     const kern_return_t kr = vm_remap(mach_task_self(), &rw, size, 0, VM_FLAGS_ANYWHERE, mach_task_self(),
-                                      reinterpret_cast<vm_address_t>(rx), FALSE, &curProt, &maxProt, VM_INHERIT_DEFAULT);
+                                      reinterpret_cast<vm_address_t>(rx), FALSE, &curProt, &maxProt, VM_INHERIT_NONE);
     if (kr != KERN_SUCCESS) {
         munmap(rx, size);
         return false;
@@ -271,11 +412,7 @@ bool JitMemory::InitializeTxmPool(size_t size) {
 
     // 4. The region is prepared: let go of the debugger (universal script: x16 = 0). Only one pool may do this per
     // process, since a second handshake after detaching would crash the app.
-    __asm__ volatile("mov x16, #0\n"
-                     "brk #0xf00d"
-                     :
-                     :
-                     : "x16", "memory");
+    TxmDetach();
     return true;
 #else
     (void)size;

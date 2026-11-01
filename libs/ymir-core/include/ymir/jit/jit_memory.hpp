@@ -34,6 +34,7 @@ struct JitStatus {
     Reason reason = Reason::UnsupportedArchitecture;
     bool txmDevice = false;       ///< iOS device with TXM, which requires the pool and the debugger handshake
     bool processDebugged = false; ///< The process is being debugged (CS_DEBUGGED on iOS)
+    std::string txmDetection;     ///< iOS: how it was decided whether the device has TXM (for logs and diagnostics)
 
     bool Available() const {
         return reason == Reason::Available;
@@ -41,6 +42,9 @@ struct JitStatus {
 
     /// @brief A short description meant for users.
     std::string Message() const;
+
+private:
+    std::string BaseMessage() const;
 };
 
 /// @brief Lets JitMemory hand out read+write+execute memory on any architecture and operating system that supports it.
@@ -48,6 +52,15 @@ struct JitStatus {
 /// Meant for tests that execute generated AArch64 code in a CPU emulator on another architecture. Never enable it in
 /// the emulator itself.
 void SetJitTestingMode(bool enable);
+
+/// @brief Tells the TXM detection which chip the device has, from the name of its GPU ("Apple A15 GPU", "Apple M2 GPU").
+///
+/// Optional; set it as early as possible (the result of the detection is kept after the first probe). Without it the
+/// detection falls back to the model identifier of the device.
+void SetChipName(const char *name);
+
+/// @brief Treats the device as having TXM whatever the detection finds (the same idea as StosDebug's "forceTXM").
+void SetForceTxm(bool force);
 
 /// @brief Checks the platform and process state without allocating anything.
 JitStatus ProbeJit();
