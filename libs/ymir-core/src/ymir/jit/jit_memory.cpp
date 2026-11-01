@@ -194,9 +194,7 @@ namespace {
     // past it and, for the prepare command, writes the address of the region into x0.
     // Command 1 prepares a JIT region. With a NULL address the enabler allocates the region itself and returns it
     // (NULL on failure); otherwise it prepares the existing mapping at `addr`.
-    __attribute__((noinline, optnone, naked)) void *TxmPrepareRegion(void *addr, size_t len) {
-        (void)addr;
-        (void)len;
+    __attribute__((noinline, optnone, naked)) void *TxmPrepareRegion([[maybe_unused]] void *addr, [[maybe_unused]] size_t len) {
         __asm__ volatile("mov x16, #1\n"
                          "brk #0xf00d\n"
                          "ret");
