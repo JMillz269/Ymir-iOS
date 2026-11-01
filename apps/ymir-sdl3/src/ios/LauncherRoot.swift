@@ -222,7 +222,7 @@ struct GamesView: View {
                         Image(systemName: useGrid ? "list.bullet" : "square.grid.2x2")
                     }
                 }
-                if canReorder && !useGrid {
+                if canReorder {
                     ToolbarItem(placement: .navigationBarLeading) {
                         Button(editMode.isEditing ? "Done" : "Reorder") {
                             withAnimation {
@@ -405,13 +405,25 @@ struct GamesView: View {
                         spacing: 20
                     ) {
                         ForEach(filteredGames) { game in
-                            Button {
-                                play(game)
-                            } label: {
+                            if editMode.isEditing {
+                                // Reordering: the tiles wiggle and are dragged onto the place they should take
                                 GameTile(game: game, isActive: game.url.path == activePath, side: side)
+                                    .modifier(WiggleEffect(seed: game.id))
+                                    .draggable(game.id)
+                                    .dropDestination(for: String.self) { items, _ in
+                                        guard let moved = items.first else { return false }
+                                        withAnimation { library.moveGame(id: moved, onto: game.id) }
+                                        return true
+                                    }
+                            } else {
+                                Button {
+                                    play(game)
+                                } label: {
+                                    GameTile(game: game, isActive: game.url.path == activePath, side: side)
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu { gameMenu(game) }
                             }
-                            .buttonStyle(.plain)
-                            .contextMenu { gameMenu(game) }
                         }
                     }
                 }
@@ -636,5 +648,20 @@ enum FilesApp {
         if let url = URL(string: "shareddocuments://" + folder.path) {
             UIApplication.shared.open(url)
         }
+    }
+}
+
+/// A small wiggle for the tiles of the library while they are being put in a new order.
+private struct WiggleEffect: ViewModifier {
+    let seed: String
+    @State private var tilted = false
+
+    func body(content: Content) -> some View {
+        // (the angle differs a little from tile to tile, so they don't move in step)
+        let angle = 0.9 + Double(abs(seed.hashValue) % 5) * 0.12
+        content
+            .rotationEffect(.degrees(tilted ? angle : -angle))
+            .animation(.easeInOut(duration: 0.14).repeatForever(autoreverses: true), value: tilted)
+            .onAppear { tilted = true }
     }
 }

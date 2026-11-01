@@ -224,6 +224,13 @@ final class GameLibrary: ObservableObject {
         Self.saveManualOrder(reordered.map(\.relativePath))
     }
 
+    /// Puts the game with this id in the place of another one (dragged onto it), in the manual order.
+    func moveGame(id: String, onto targetID: String) {
+        guard let from = games.firstIndex(where: { $0.id == id }),
+              let to = games.firstIndex(where: { $0.id == targetID }), from != to else { return }
+        moveGames(from: IndexSet(integer: from), to: to > from ? to + 1 : to)
+    }
+
     private static func manualOrder() -> [String] {
         UserDefaults.standard.stringArray(forKey: manualOrderKey) ?? []
     }
