@@ -535,7 +535,9 @@ struct CoverArtView: View {
             RoundedRectangle(cornerRadius: size * 0.22, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.1), lineWidth: 0.5)
         )
-        .task(id: "\(game.id)|\(game.coverStamp)") {
+        // (the size is part of the id: the grid is laid out with a small width at first, and a picture loaded for that
+        // size stayed on screen, blurred, after the tiles had got their real size)
+        .task(id: "\(game.id)|\(game.coverStamp)|\(Int(size * displayScale))") {
             image = await CoverCache.shared.image(for: game, pixelSize: size * displayScale)
         }
     }
