@@ -372,6 +372,9 @@ function(_shader_make_compile_dxil_command)
                 ${_compile_flags}
                 ${_include_paths_args}
                 ${_macro_args}
+                "-DVK_BINDING(b,s)="
+                "-DVK_LOCATION(l)="
+                "-DVK_PUSH_CONSTANT="
                 -Fo "${ARG_DESTINATION}"
                 "${ARG_SOURCE}"
             PARENT_SCOPE
@@ -476,6 +479,9 @@ function(_shader_make_compile_spirv_command)
                 ${_compile_flags}
                 ${_include_paths_args}
                 ${_macro_args}
+                "-DVK_BINDING(b,s)=vk::binding(b,s)"
+                "-DVK_LOCATION(l)=vk::location(l)"
+                "-DVK_PUSH_CONSTANT=vk::push_constant"
                 -Fo "${ARG_DESTINATION}"
                 "${ARG_SOURCE}"
             PARENT_SCOPE
@@ -770,6 +776,7 @@ function(compile_shader)
 
             DEPFILE "${_dep_file}"
             COMMENT "Compiling ${_source_abs_path} to ${_outputs}"
+            VERBATIM
         )
     else()
         # Fallback for generators without DEPFILE support
@@ -816,6 +823,7 @@ function(compile_shader)
             ${_compile_commands}
             DEPENDS ${_deps}
             COMMENT "Compiling ${_source_abs_path} to ${_outputs}"
+            VERBATIM
         )
     endif()
 
