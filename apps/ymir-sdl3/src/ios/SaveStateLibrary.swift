@@ -23,6 +23,8 @@ struct SavedSlot: Identifiable, Hashable {
         let url = folder.appendingPathComponent("\(index).jpg")
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
+    /// When the picture was written: tells the views a new picture is there when the file name hasn't changed.
+    var thumbnailStamp: Date? { thumbnailURL.flatMap { SlotThumbnail.modificationDate(of: $0) } }
     var dateText: String { date.formatted(date: .abbreviated, time: .shortened) }
     var sizeText: String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
 }
@@ -183,7 +185,14 @@ enum SaveStateCatalog {
 /// The small picture saved with a save state.
 struct SlotThumbnail: View {
     let url: URL?
+    /// When the picture file was written. A state saved over an old one keeps the file name, and a view whose
+    /// inputs haven't changed isn't drawn again, so the old picture would stay; a new stamp makes it load again.
+    var stamp: Date?
     var width: CGFloat = 64
+
+    static func modificationDate(of url: URL) -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
 
     var body: some View {
         Group {
@@ -199,6 +208,7 @@ struct SlotThumbnail: View {
         }
         .frame(width: width, height: width * 3 / 4)
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .id(stamp)
         .accessibilityHidden(true)
     }
 }
@@ -262,7 +272,7 @@ struct SaveStateManagerView: View {
                 GlassSection {
                     ForEach(entry.slots) { slot in
                         HStack {
-                            SlotThumbnail(url: slot.thumbnailURL)
+                            SlotThumbnail(url: slot.thumbnailURL, stamp: slot.thumbnailStamp)
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(slot.title)
                                 Text("\(slot.dateText) · \(slot.sizeText)")

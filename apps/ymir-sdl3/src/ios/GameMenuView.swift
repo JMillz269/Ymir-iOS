@@ -174,6 +174,7 @@ struct SaveStatesView: View {
             let url = URL(fileURLWithPath: path).deletingPathExtension().appendingPathExtension("jpg")
             return FileManager.default.fileExists(atPath: url.path) ? url : nil
         }
+        var thumbnailStamp: Date? { thumbnailURL.flatMap { SlotThumbnail.modificationDate(of: $0) } }
     }
 
     /// A save state file copied under a readable name, for the share sheet
@@ -219,7 +220,7 @@ struct SaveStatesView: View {
                 ForEach(slots) { slot in
                     HStack {
                         if slot.present {
-                            SlotThumbnail(url: slot.thumbnailURL, width: 56)
+                            SlotThumbnail(url: slot.thumbnailURL, stamp: slot.thumbnailStamp, width: 56)
                         }
                         VStack(alignment: .leading, spacing: 2) {
                             Text(slot.title)
@@ -234,6 +235,8 @@ struct SaveStatesView: View {
                                 slots = Self.readSlots()
                                 // Saving happens on the emulator thread; read again once it had time to finish
                                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { slots = Self.readSlots() }
+                                // (the picture is written after the state)
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { slots = Self.readSlots() }
                             }
                             .ymirSecondaryButton()
                         }
