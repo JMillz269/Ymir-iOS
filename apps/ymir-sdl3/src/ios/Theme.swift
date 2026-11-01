@@ -306,6 +306,27 @@ final class BackdropTheme: ObservableObject {
     private static let countKey = "theme.backdropColorCount"
     private static let colorsKey = "theme.backdropColors"
     private static let intensityKey = "theme.backdropIntensity"
+    private static let blurKey = "theme.backgroundBlur"
+    private static let blurAmountKey = "theme.backgroundBlurAmount"
+
+    /// Where the player's own background picture is kept (not in the Files-visible Documents folder).
+    private static var imageURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("background.jpg")
+    }
+
+    /// The player's own picture for the background, or nil to paint it with the colours.
+    @Published private(set) var backgroundImage: UIImage?
+
+    /// Whether the picture is blurred, so the glass and the text on it stay easy to read.
+    @Published var blurBackground: Bool {
+        didSet { UserDefaults.standard.set(blurBackground, forKey: Self.blurKey) }
+    }
+
+    /// How strongly the picture is blurred when `blurBackground` is on.
+    @Published var blurAmount: Double {
+        didSet { UserDefaults.standard.set(blurAmount, forKey: Self.blurAmountKey) }
+    }
 
     /// How many of the colours are used.
     @Published var colorCount: Int {
@@ -335,6 +356,36 @@ final class BackdropTheme: ObservableObject {
         colorCount = min(max(count, Self.minColors), Self.maxColors)
         let strength = defaults.object(forKey: Self.intensityKey) as? Double ?? 1.0
         intensity = min(max(strength, 0.0), 1.5)
+        blurBackground = defaults.object(forKey: Self.blurKey) as? Bool ?? true
+        blurAmount = min(max(defaults.object(forKey: Self.blurAmountKey) as? Double ?? 20, 4), 40)
+        backgroundImage = UIImage(contentsOfFile: Self.imageURL.path)
+    }
+
+    /// Uses the picture in `data` as the background. Returns false when it isn't an image.
+    @discardableResult
+    func setBackground(data: Data) -> Bool {
+        guard let original = UIImage(data: data) else { return false }
+        // Scaled down so that it is cheap to draw, and so that it doesn't take much space.
+        let longest = max(original.size.width, original.size.height)
+        let factor = min(1, 2000 / max(longest, 1))
+        let size = CGSize(width: original.size.width * factor, height: original.size.height * factor)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        let scaled = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+            original.draw(in: CGRect(origin: .zero, size: size))
+        }
+        guard let jpeg = scaled.jpegData(compressionQuality: 0.85) else { return false }
+        let url = Self.imageURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard (try? jpeg.write(to: url, options: .atomic)) != nil else { return false }
+        backgroundImage = scaled
+        return true
+    }
+
+    /// Goes back to painting the background with the colours.
+    func removeBackground() {
+        try? FileManager.default.removeItem(at: Self.imageURL)
+        backgroundImage = nil
     }
 
     /// The colours that are drawn.
@@ -411,10 +462,24 @@ struct YmirBackdrop: View {
             let w = geo.size.width
             let h = geo.size.height
             ZStack {
-                (scheme == .dark ? Color(red: 0.04, green: 0.04, blue: 0.12) : Color(red: 0.93, green: 0.94, blue: 1.0))
-                ForEach(Array(theme.activeColors.enumerated()), id: \.offset) { index, color in
-                    let spot = Self.placements[index % Self.placements.count]
-                    blob(color, size: w * spot.size, x: w * spot.x, y: h * spot.y)
+                if let image = theme.backgroundImage {
+                    let blurred = theme.blurBackground
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: w, height: h)
+                        // Scaled up a little when blurred, so that the soft edges of the blur stay outside the screen.
+                        .scaleEffect(blurred ? 1.12 : 1)
+                        .blur(radius: blurred ? theme.blurAmount : 0)
+                        .clipped()
+                    // Keeps text on the glass readable on bright pictures.
+                    Color.black.opacity(scheme == .dark ? 0.25 : 0.08)
+                } else {
+                    (scheme == .dark ? Color(red: 0.04, green: 0.04, blue: 0.12) : Color(red: 0.93, green: 0.94, blue: 1.0))
+                    ForEach(Array(theme.activeColors.enumerated()), id: \.offset) { index, color in
+                        let spot = Self.placements[index % Self.placements.count]
+                        blob(color, size: w * spot.size, x: w * spot.x, y: h * spot.y)
+                    }
                 }
             }
             .frame(width: w, height: h)
@@ -429,6 +494,42 @@ struct YmirBackdrop: View {
             .frame(width: size, height: size)
             .blur(radius: 70)
             .offset(x: x, y: y)
+    }
+}
+
+// MARK: - Search
+
+/// A search field on a Liquid Glass capsule (a translucent material before iOS 26), for floating over a list.
+struct YmirSearchField: View {
+    @Binding var text: String
+    var prompt = "Search"
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField(prompt, text: $text)
+                .focused($focused)
+                .submitLabel(.search)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 11)
+        .contentShape(Capsule())
+        .onTapGesture { focused = true }
+        .ymirGlass(in: Capsule())
     }
 }
 
