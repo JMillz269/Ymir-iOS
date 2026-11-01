@@ -13,7 +13,27 @@ final class ShellHostingController<Content: View>: UIHostingController<Content> 
         super.viewDidLoad()
         // Light, dark or the iOS setting, as picked in Settings > Appearance; it applies to what this screen presents too.
         appearanceObserver = BackdropTheme.shared.$appearanceMode.sink { [weak self] mode in
-            self?.overrideUserInterfaceStyle = mode.interfaceStyle
+            self?.applyAppearance(mode)
+        }
+    }
+
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        applyAppearance(BackdropTheme.shared.appearanceMode)
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        applyAppearance(BackdropTheme.shared.appearanceMode)
+    }
+
+    /// Sets the style on this screen and on the window(s) it is shown in. The context menus and their previews are
+    /// drawn by the system outside of this screen, and take their look from the window.
+    private func applyAppearance(_ mode: AppearanceMode) {
+        overrideUserInterfaceStyle = mode.interfaceStyle
+        let windows = view.window?.windowScene?.windows ?? view.window.map { [$0] } ?? []
+        for window in windows {
+            window.overrideUserInterfaceStyle = mode.interfaceStyle
         }
     }
 
