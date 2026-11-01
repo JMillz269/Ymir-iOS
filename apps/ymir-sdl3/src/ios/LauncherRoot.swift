@@ -202,7 +202,6 @@ struct GamesView: View {
             }
             .listStyle(.plain)
             .navigationTitle("Games")
-            .searchable(text: $search, prompt: "Search games")
             .refreshable { refresh() }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -259,6 +258,9 @@ struct GamesView: View {
                     ConversionBar(converter: converter)
                     if let game = activeGame {
                         ResumeBar(game: game, onResume: onResume)
+                    }
+                    if !library.games.isEmpty {
+                        YmirSearchField(text: $search, prompt: "Search games")
                     }
                 }
                 .padding(.horizontal, 16)

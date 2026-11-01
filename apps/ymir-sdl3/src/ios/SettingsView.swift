@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -1084,6 +1085,8 @@ struct InterfaceSettingsView: View {
 /// Picks the colours of the backdrop: how many there are, which they are, and how strongly they show.
 struct AppearanceSettingsView: View {
     @ObservedObject private var theme = BackdropTheme.shared
+    @State private var photoItem: PhotosPickerItem?
+    @State private var photoFailed = false
 
     private func colorBinding(_ index: Int) -> Binding<Color> {
         Binding(
@@ -1107,6 +1110,53 @@ struct AppearanceSettingsView: View {
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
                             .strokeBorder(Color.white.opacity(0.25), lineWidth: 0.5))
             }
+
+            GlassSection(content: {
+                Picker("Theme", selection: $theme.appearanceMode) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }, header: {
+                Text("Theme")
+            }, footer: {
+                WrappedText("Automatic follows the iOS setting for light or dark. Light and Dark always use that look, whatever iOS is set to.")
+            })
+
+            GlassSection(content: {
+                PhotosPicker(selection: $photoItem, matching: .images) {
+                    HStack {
+                        Text(theme.backgroundImage == nil ? "Choose Photo…" : "Change Photo…")
+                            .foregroundStyle(.primary)
+                        Spacer(minLength: 8)
+                        Image(systemName: "photo.on.rectangle")
+                            .foregroundStyle(.secondary)
+                    }
+                    .contentShape(Rectangle())
+                }
+                if theme.backgroundImage != nil {
+                    Toggle("Blur", isOn: $theme.blurBackground)
+                    if theme.blurBackground {
+                        SettingSlider(title: "Blur Amount", value: $theme.blurAmount, range: 4...40, step: 1,
+                                      format: { String(format: "%.0f", $0) })
+                    }
+                    Button {
+                        theme.removeBackground()
+                    } label: {
+                        Text("Remove Photo")
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }, header: {
+                Text("Photo")
+            }, footer: {
+                WrappedText(photoFailed
+                    ? "That file couldn't be used as a picture. Try another one."
+                    : "Use your own picture behind the menus. Blur softens it so the glass and the text on it stay easy to read; turn it off to see the picture sharp. The colors below are used when there is no photo.")
+            })
 
             GlassSection(content: {
                 Stepper(value: $theme.colorCount, in: BackdropTheme.minColors...BackdropTheme.maxColors) {
@@ -1173,6 +1223,14 @@ struct AppearanceSettingsView: View {
         }
         .navigationTitle("Appearance")
         .navigationBarTitleDisplayMode(.inline)
+        .onChange(of: photoItem) { item in
+            guard let item else { return }
+            Task {
+                let data = try? await item.loadTransferable(type: Data.self)
+                photoFailed = data == nil || !theme.setBackground(data: data!)
+                photoItem = nil
+            }
+        }
     }
 }
 
