@@ -48,6 +48,8 @@ struct GamesView: View {
     let onLaunchState: (GameEntry, Int) -> Void
     let onResume: () -> Void
 
+    @ObservedObject private var converter = CHDConverter.shared
+    @State private var conversionReport: ConversionReport?
     @State private var search = ""
     @State private var showImporter = false
     @State private var importKind = ImportKind.games
@@ -253,11 +255,24 @@ struct GamesView: View {
                 }
             }
             .safeAreaInset(edge: .bottom) {
-                if let game = activeGame {
-                    ResumeBar(game: game, onResume: onResume)
-                        .padding(.horizontal, 16)
-                        .padding(.bottom, 8)
+                VStack(spacing: 8) {
+                    ConversionBar(converter: converter)
+                    if let game = activeGame {
+                        ResumeBar(game: game, onResume: onResume)
+                    }
                 }
+                .padding(.horizontal, 16)
+                .padding(.bottom, 8)
+            }
+            .onChange(of: converter.completedCount) { _ in library.reload() }
+            .onChange(of: converter.report) { value in
+                if let value {
+                    conversionReport = value
+                    converter.report = nil
+                }
+            }
+            .alert(item: $conversionReport) { report in
+                Alert(title: Text(report.title), message: Text(report.message), dismissButton: .default(Text("OK")))
             }
             .overlay {
                 if isImporting {
@@ -321,6 +336,14 @@ struct GamesView: View {
             } label: {
                 Label("Load State", systemImage: "clock.arrow.circlepath")
             }
+        }
+        if converter.isAvailable && CHDConverter.canConvert(game) {
+            Button {
+                converter.enqueue([game])
+            } label: {
+                Label(converter.isQueued(game) ? "Converting to CHD…" : "Convert to CHD", systemImage: "archivebox")
+            }
+            .disabled(converter.isQueued(game) || game.url.path == activeGame?.url.path)
         }
         Menu {
             Button {

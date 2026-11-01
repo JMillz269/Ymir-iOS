@@ -366,6 +366,10 @@ struct SettingsView: View {
                         SaveStateManagerView()
                     }
                     SettingsRowDivider()
+                    SettingsNavRow(icon: "archivebox.fill", tint: .orange, title: "Convert to CHD") {
+                        CHDConversionSettingsView()
+                    }
+                    SettingsRowDivider()
                     Button {
                         FilesApp.openDocuments()
                     } label: {

@@ -46,6 +46,22 @@ NS_ASSUME_NONNULL_BEGIN
 + (void)quitGame NS_SWIFT_NAME(quitGame());
 + (void)takeScreenshot NS_SWIFT_NAME(takeScreenshot());
 
+/// Whether this build can convert disc images to CHD files.
+@property(class, nonatomic, readonly) BOOL chdConversionAvailable;
+
+/// Converts a disc image (CUE, ISO, CCD, MDS) to a CHD file, on a background thread; the emulator isn't involved and may
+/// be running. `progress` is called from that thread with the steps done and their total (converting, then checking the
+/// new file); returning NO cancels. `completion` is called from that thread when it's over: `status` is 0 when it worked,
+/// 1 when it was cancelled and 2 when it failed (`message` says why), with the size of the CHD file and of the disc data
+/// it holds. A file that was started is removed again if the conversion doesn't succeed.
++ (void)convertDiscImageAtPath:(NSString *)source
+                   toCHDAtPath:(NSString *)destination
+              compressionLevel:(NSInteger)level
+                      progress:(BOOL (^)(uint64_t done, uint64_t total))progress
+                    completion:(void (^)(NSInteger status, NSString *message, uint64_t outputBytes,
+                                         uint64_t rawBytes))completion
+    NS_SWIFT_NAME(convertDiscImage(at:toCHDAt:level:progress:completion:));
+
 /// Rescans the BIOS folder and loads an IPL ROM. Returns an error message, or nil on success.
 + (nullable NSString *)reloadBIOS NS_SWIFT_NAME(reloadBIOS());
 

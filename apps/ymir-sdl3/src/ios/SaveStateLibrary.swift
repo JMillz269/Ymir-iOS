@@ -119,6 +119,18 @@ enum SaveStateCatalog {
         }
     }
 
+    /// Notes a new image path for the save states of a game whose file was replaced by another (a conversion to CHD).
+    /// The save states themselves stay where they are: the CHD file has the same disc contents, so the same hash.
+    static func relink(from oldRelativePath: String, to newRelativePath: String) {
+        guard let folders = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else { return }
+        for folder in folders {
+            let link = folder.appendingPathComponent("game.txt")
+            guard let current = firstLine(of: link), normalized(current) == normalized(oldRelativePath) else { continue }
+            try? (newRelativePath + "\n").write(to: link, atomically: true, encoding: .utf8)
+        }
+    }
+
     /// The save states of a game of the library, newest first.
     static func slots(for game: GameEntry, in saved: [SavedGame]) -> [SavedSlot] {
         guard let entry = saved.first(where: { $0.game?.id == game.id }) else { return [] }

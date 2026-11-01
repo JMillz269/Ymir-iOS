@@ -4,6 +4,8 @@
 #import <QuartzCore/QuartzCore.h>
 
 #include <app/ios/host_interface.hpp>
+
+#include <ymir/media/chd_convert.hpp>
 #include <util/ios_platform.hpp>
 
 #include <ymir/hw/sh2/sh2_recompiler.hpp>
@@ -91,6 +93,41 @@ static NSString *ToNSString(const std::filesystem::path &path) {
 
 + (void)setGameWindow:(UIWindow *)window {
     s_gameWindow = window;
+}
+
++ (BOOL)chdConversionAvailable {
+    return ymir::media::IsCHDConversionAvailable();
+}
+
++ (void)convertDiscImageAtPath:(NSString *)source
+                   toCHDAtPath:(NSString *)destination
+              compressionLevel:(NSInteger)level
+                      progress:(BOOL (^)(uint64_t, uint64_t))progress
+                    completion:(void (^)(NSInteger, NSString *, uint64_t, uint64_t))completion {
+    NSString *sourcePath = [source copy];
+    NSString *destinationPath = [destination copy];
+    BOOL (^progressBlock)(uint64_t, uint64_t) = [progress copy];
+    void (^completionBlock)(NSInteger, NSString *, uint64_t, uint64_t) = [completion copy];
+    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+        ymir::media::CHDConvertOptions options;
+        options.compressionLevel = static_cast<int>(level);
+        options.verify = true;
+
+        const ymir::media::CHDConvertResult result = ymir::media::ConvertImageToCHD(
+            std::filesystem::path{std::string{sourcePath.UTF8String}},
+            std::filesystem::path{std::string{destinationPath.UTF8String}}, options,
+            [&](uint64_t done, uint64_t total) { return progressBlock == nil ? true : progressBlock(done, total) == YES; });
+
+        NSInteger status = 2;
+        if (result.status == ymir::media::CHDConvertStatus::Ok) {
+            status = 0;
+        } else if (result.status == ymir::media::CHDConvertStatus::Cancelled) {
+            status = 1;
+        }
+        if (completionBlock != nil) {
+            completionBlock(status, ToNSString(result.message), result.outputBytes, result.rawBytes);
+        }
+    });
 }
 
 + (BOOL)isRunning {

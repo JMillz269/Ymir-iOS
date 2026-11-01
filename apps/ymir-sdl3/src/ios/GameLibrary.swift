@@ -135,7 +135,7 @@ final class GameLibrary: ObservableObject {
     private static let discExtensions: Set<String> = ["cue", "chd", "iso", "ccd", "mds"]
     // Folders of the emulator profile that never contain games
     private static let ignoredFolders: Set<String> = [
-        "roms", "backup", "savestates", "state", "screenshots", "dumps", "covers", "exports",
+        "roms", "backup", "savestates", "state", "screenshots", "dumps", "covers", "exports", "originals",
     ]
     private static let lastPlayedKey = "ymir.lastPlayed"
     private static let customNamesKey = "ymir.customNames"
@@ -242,6 +242,29 @@ final class GameLibrary: ObservableObject {
         removeArtworkFiles(for: game)
         rename(game, to: nil, reloadAfter: false)
         reload()
+    }
+
+    /// Hands what the app remembers about a game (its name, when it was played, its place in the manual order) over to
+    /// the path the game has now, for a game whose file was replaced by another (a conversion to CHD).
+    static func transferMetadata(from old: GameEntry, toRelativePath newPath: String) {
+        guard old.relativePath != newPath else { return }
+        let defaults = UserDefaults.standard
+
+        var names = customNames()
+        if let name = names.removeValue(forKey: old.relativePath) {
+            names[newPath] = name
+            defaults.set(names, forKey: customNamesKey)
+        }
+        var played = lastPlayed()
+        if let time = played.removeValue(forKey: old.relativePath) {
+            played[newPath] = time
+            defaults.set(played, forKey: lastPlayedKey)
+        }
+        var order = manualOrder()
+        if let index = order.firstIndex(of: old.relativePath) {
+            order[index] = newPath
+            saveManualOrder(order)
+        }
     }
 
     // MARK: Names

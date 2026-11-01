@@ -447,6 +447,11 @@ enum AppPaths {
         documents.appendingPathComponent("roms", isDirectory: true).appendingPathComponent("ipl", isDirectory: true)
     }
 
+    /// Where the originals of converted games are moved to when they are kept (the library doesn't list this folder).
+    static var originals: URL {
+        documents.appendingPathComponent("originals", isDirectory: true)
+    }
+
     static var covers: URL {
         documents.appendingPathComponent("covers", isDirectory: true)
     }

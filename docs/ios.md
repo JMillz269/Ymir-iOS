@@ -215,3 +215,12 @@ are not all run. This is the common way games wait for a time to pass; the stati
   while it is still being drawn.
 - At higher internal resolutions a thin line has been seen where polygons meet on a bridge in one game; it is not fixed yet.
 - Save states made before the Save States manager existed show as an unknown game until the game has been started once.
+
+## Convert to CHD
+
+Settings > Files > Convert to CHD (and "Convert to CHD" in the long-press menu of a game that isn't a CHD file) turns a
+BIN/CUE, ISO or similar disc image into a single compressed CHD file (CD, v5, "cdzl" codec; zlib is the only
+dependency). The new file is written to `<name>.chd.part`, read back and compared with the disc, and only then put in
+place of the original. The game keeps its name, play time, cover art and save states. The originals are deleted, or
+moved to `Documents/originals/` when "Keep the Originals" is on. The conversion needs free storage of about the size of
+the disc image and cannot run on the game that is running.

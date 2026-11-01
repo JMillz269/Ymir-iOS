@@ -461,6 +461,7 @@ if (IOS)
         src/ios/GameMenuView.swift
         src/ios/LauncherRoot.swift
         src/ios/SaveStateLibrary.swift
+        src/ios/CHDConversion.swift
         src/ios/SettingsView.swift
         src/ios/TouchEditorBar.swift
         src/ios/Theme.swift
