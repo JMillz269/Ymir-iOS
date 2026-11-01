@@ -538,6 +538,7 @@ struct CoverArtView: View {
         // (the size is part of the id: the grid is laid out with a small width at first, and a picture loaded for that
         // size stayed on screen, blurred, after the tiles had got their real size)
         .task(id: "\(game.id)|\(game.coverStamp)|\(Int(size * displayScale))") {
+            guard size > 1 else { return }
             image = await CoverCache.shared.image(for: game, pixelSize: size * displayScale)
         }
     }
