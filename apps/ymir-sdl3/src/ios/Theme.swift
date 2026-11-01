@@ -244,6 +244,46 @@ struct WrappedText: UIViewRepresentable {
     }
 }
 
+/// A title that wraps at a width it is given, over up to `lines` lines, and always takes the height of all of them (so
+/// the cards of a row are as tall as each other). SwiftUI's `Text` stayed on one line here and ran over the edge of
+/// its card, as the footnotes did (see `WrappedText`), so a label that is told its width draws it.
+struct FixedWidthTitle: UIViewRepresentable {
+    let text: String
+    let width: CGFloat
+    var lines = 2
+    var style = UIFont.TextStyle.subheadline
+    var weight = UIFont.Weight.medium
+
+    private var font: UIFont {
+        let base = UIFont.preferredFont(forTextStyle: style)
+        return UIFont.systemFont(ofSize: base.pointSize, weight: weight)
+    }
+
+    func makeUIView(context: Context) -> UILabel {
+        let label = UILabel()
+        label.numberOfLines = lines
+        label.lineBreakMode = .byTruncatingTail
+        label.adjustsFontForContentSizeCategory = true
+        label.textColor = .label
+        label.backgroundColor = .clear
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        label.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return label
+    }
+
+    func updateUIView(_ label: UILabel, context: Context) {
+        label.text = text
+        label.font = font
+        label.numberOfLines = lines
+        label.preferredMaxLayoutWidth = width
+    }
+
+    @available(iOS 16.0, *)
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView label: UILabel, context: Context) -> CGSize? {
+        CGSize(width: width, height: ceil(font.lineHeight) * CGFloat(lines))
+    }
+}
+
 /// A picker row for glass forms: the title on the left and the choice, as a menu, on the right (a plain `Picker`
 /// outside a `Form` puts them next to each other).
 struct GlassPicker<SelectionValue: Hashable, Content: View>: View {
