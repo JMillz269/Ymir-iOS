@@ -569,13 +569,47 @@ struct YmirBackdrop: View {
 
 // MARK: - Search
 
-/// A search field on a Liquid Glass capsule (a translucent material before iOS 26), for floating over a list.
+/// A search button on a Liquid Glass circle that opens into a search field, a capsule of glass (a translucent material
+/// before iOS 26), for floating over a list. The field closes again when it loses focus with nothing typed in it.
 struct YmirSearchField: View {
     @Binding var text: String
     var prompt = "Search"
     @FocusState private var focused: Bool
+    @State private var expanded = false
+
+    private var isOpen: Bool { expanded || !text.isEmpty }
 
     var body: some View {
+        HStack(spacing: 0) {
+            Spacer(minLength: 0)
+            if isOpen {
+                field
+                    .transition(.scale(scale: 0.4, anchor: .trailing).combined(with: .opacity))
+            } else {
+                Button {
+                    open()
+                } label: {
+                    Image(systemName: "magnifyingglass")
+                        .font(.title3.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .frame(width: 48, height: 48)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .ymirGlass(in: Circle())
+                .accessibilityLabel(prompt)
+                .transition(.scale(scale: 0.6, anchor: .trailing).combined(with: .opacity))
+            }
+        }
+        .animation(.spring(response: 0.38, dampingFraction: 0.82), value: isOpen)
+        .onChange(of: focused) { isFocused in
+            if !isFocused && text.isEmpty {
+                expanded = false
+            }
+        }
+    }
+
+    private var field: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
                 .foregroundStyle(.secondary)
@@ -584,22 +618,33 @@ struct YmirSearchField: View {
                 .submitLabel(.search)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
-            if !text.isEmpty {
-                Button {
-                    text = ""
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Clear search")
+            Button {
+                close()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .foregroundStyle(.secondary)
             }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Close search")
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
+        .frame(minHeight: 48)
         .contentShape(Capsule())
         .onTapGesture { focused = true }
         .ymirGlass(in: Capsule())
+    }
+
+    private func open() {
+        expanded = true
+        // (the field exists once the state has changed)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { focused = true }
+    }
+
+    private func close() {
+        text = ""
+        focused = false
+        expanded = false
     }
 }
 
