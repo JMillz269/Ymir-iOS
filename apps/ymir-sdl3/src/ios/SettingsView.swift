@@ -82,7 +82,7 @@ private func percent(_ value: Double) -> String {
 
 /// A one-tap bundle of speed and accuracy options. The same bundles back the presets in Advanced.
 enum PerformanceProfile: String, CaseIterable, Identifiable {
-    case speed, balanced, accuracy
+    case speed, balanced, accuracy, quality
 
     var id: String { rawValue }
 
@@ -91,6 +91,7 @@ enum PerformanceProfile: String, CaseIterable, Identifiable {
         case .speed: return "Speed"
         case .balanced: return "Balanced"
         case .accuracy: return "Accuracy"
+        case .quality: return "Quality"
         }
     }
 
@@ -100,11 +101,13 @@ enum PerformanceProfile: String, CaseIterable, Identifiable {
         case .speed: values = (false, 0, 0, true)
         case .balanced: values = (false, 1, 0, true)
         case .accuracy: values = (true, 1, 5, false)
+        case .quality: values = (false, 1, 5, true)
         }
         let (sh2Cache, interpolation, granularity, smooth) = values
         store.bool("audio.threadedSCSP").wrappedValue = smooth
         store.int("video.framePacing").wrappedValue = smooth ? 1 : 0
         store.int("video.frameDelay").wrappedValue = smooth ? 1 : 0
+        applyVideo(to: store)
         store.bool("system.emulateSH2Cache").wrappedValue = sh2Cache
         store.intSlider("system.sh2ClockFactor").wrappedValue = 100
         store.int("audio.interpolation").wrappedValue = interpolation
@@ -113,13 +116,44 @@ enum PerformanceProfile: String, CaseIterable, Identifiable {
         store.bool("cdblock.useLLE").wrappedValue = false
     }
 
+    /// The video options of the profiles at the ends: Speed turns the enhancements off, Quality turns them all on.
+    /// (Balanced and Accuracy leave the picture as it is.) The renderer itself is left as chosen.
+    private func applyVideo(to store: SettingStore) {
+        switch self {
+        case .speed:
+            store.int("video.internalResolution", default: 1).wrappedValue = 1
+            store.int("video.upscaling").wrappedValue = 0
+            store.bool("video.skipNativeVDP1").wrappedValue = false
+            store.bool("video.deinterlace").wrappedValue = false
+            store.bool("video.transparentMeshes").wrappedValue = false
+        case .quality:
+            store.bool("video.metalRenderer").wrappedValue = true
+            store.bool("video.metalVDP1").wrappedValue = true
+            store.bool("video.metalDirectDisplay").wrappedValue = true
+            store.int("video.internalResolution", default: 1).wrappedValue = 3
+            if YmirHost.boolValue(key: "video.upscalingSupported", default: false) {
+                store.int("video.upscaling").wrappedValue = 1
+            }
+            store.bool("video.skipNativeVDP1").wrappedValue = true
+            store.bool("video.deinterlace").wrappedValue = true
+            store.bool("video.transparentMeshes").wrappedValue = true
+            store.bool("video.sharpPixels").wrappedValue = true
+            store.float("video.sharpness").wrappedValue = 0.6
+            store.bool("video.reduceLatency").wrappedValue = true
+        case .balanced, .accuracy:
+            break
+        }
+    }
+
     /// The profile the current options match, or nil when they have been tuned by hand.
     static var current: PerformanceProfile? {
         let cache = YmirHost.boolValue(key: "system.emulateSH2Cache", default: false)
         let pacing = YmirHost.intValue(key: "video.framePacing", default: 1)
         let interpolation = YmirHost.intValue(key: "audio.interpolation", default: 1)
         let granularity = YmirHost.intValue(key: "audio.stepGranularity", default: 0)
+        let resolution = YmirHost.intValue(key: "video.internalResolution", default: 1)
         if cache && pacing == 0 && granularity == 5 { return .accuracy }
+        if !cache && pacing == 1 && interpolation == 1 && granularity == 5 && resolution >= 2 { return .quality }
         if !cache && pacing == 1 && interpolation == 0 { return .speed }
         if !cache && pacing == 1 && interpolation == 1 && granularity == 0 { return .balanced }
         return nil
@@ -882,10 +916,13 @@ struct PerformanceSettingsView: View {
                 Button("Best Performance") {
                     PerformanceProfile.speed.apply(to: store)
                 }
+                Button("Best Quality") {
+                    PerformanceProfile.quality.apply(to: store)
+                }
             } header: {
                 Text("Presets")
             } footer: {
-                WrappedText("Presets change the options below, the sound chip settings in Audio and, in Display, Frame Pacing and Frame Delay: Recommended and Best Performance use Match Display and Auto with the sound chip on its own thread; Best Accuracy keeps the Saturn's exact speed and no delay.")
+                WrappedText("Presets change the options below, the sound chip settings in Audio and, in Display, Frame Pacing and Frame Delay: Recommended and Best Performance use Match Display and Auto with the sound chip on its own thread; Best Accuracy keeps the Saturn's exact speed and no delay. Best Performance also turns the picture enhancements off. Best Quality turns on the Metal renderer with 3x resolution, MetalFX, Skip Native Drawing, deinterlacing and transparent meshes.")
             }
 
             GlassSection {
