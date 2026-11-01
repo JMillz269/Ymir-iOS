@@ -68,6 +68,20 @@ EmuEvent SetTransparentMeshes(bool enable) {
     });
 }
 
+EmuEvent SetInternalResolution(uint32 scale) {
+    return RunFunction([=](SharedContext &ctx) {
+        ctx.saturn.instance->VDP.ModifyEnhancements(
+            [&](vdp::config::Enhancements &enhancements) { enhancements.internalResolution = scale; });
+    });
+}
+
+EmuEvent SetSkipNativeVDP1(bool skip) {
+    return RunFunction([=](SharedContext &ctx) {
+        ctx.saturn.instance->VDP.ModifyEnhancements(
+            [&](vdp::config::Enhancements &enhancements) { enhancements.skipNativeVDP1 = skip; });
+    });
+}
+
 EmuEvent UseNullVDPRenderer(util::Event &event) {
     return RunFunction([&event](SharedContext &ctx) {
         auto &vdp = ctx.saturn.instance->VDP;
@@ -91,6 +105,29 @@ EmuEvent SwitchVDPRenderer(bool verbose) {
 
         auto &settings = ctx.serviceLocator.GetRequired<Settings>();
         auto &vdp = ctx.saturn.instance->VDP;
+#if YMIR_PLATFORM_HAS_METAL
+        if (settings.video.useMetalRenderer) {
+            if (auto *metalCtx = gfxCtx.As<gfx::MetalGraphicsContext>()) {
+                auto result = vdp.UseMetalRenderer(metalCtx->GetDevice(), settings.video.useMetalVDP1);
+                if (result) {
+                    // Its images go straight to the display on the GPU, unless that's turned off
+                    metalCtx->ResetDisplayOutputTextures();
+                    if (settings.video.useMetalDirectDisplay) {
+                        result.Value()->SetDisplaySink(metalCtx->GetDisplaySink());
+                    }
+                    ctx.screen.frameReadyEvent.Set(); // unblock main thread in case video sync is enabled
+                    notifySuccess("Metal renderer initialized successfully");
+                    return;
+                }
+                ctx.DisplayMessage(fmt::format("Failed to create Metal VDP renderer: {}", result.Error().message));
+            } else {
+                ctx.DisplayMessage("The Metal renderer needs the Metal graphics backend");
+            }
+
+            // Metal renderer instantiation failed; revert setting
+            settings.video.useMetalRenderer = false;
+        }
+#endif
         if (settings.video.useHardwareAcceleration) {
             const gfx::Backend backend = gfxCtx.GetBackend();
             switch (backend) {
@@ -127,7 +164,8 @@ EmuEvent SwitchVDPRenderer(bool verbose) {
         }
 
         // Fall back to software renderer if not using GPU acceleration or the hardware renderer failed to initialize
-        if (vdp.GetRenderer().GetType() != vdp::VDPRendererType::Software) {
+        const vdp::SoftwareVDPRenderer *currentSw = vdp.GetRenderer().As<vdp::VDPRendererType::Software>();
+        if (currentSw == nullptr || currentSw->IsGpuAssisted()) {
             vdp.UseSoftwareRenderer();
             gfxCtx.ResetDisplayOutputTextures();
             notifySuccess("Software renderer initialized successfully");
@@ -835,6 +873,29 @@ EmuEvent SaveState(uint32 slotIndex) {
         }
 
         ctx.EnqueueEvent(events::gui::StateSaved(slotIndex));
+    });
+}
+
+EmuEvent AutoSaveState(std::function<void()> done) {
+    return RunFunction([done = std::move(done)](SharedContext &ctx) {
+        auto &saves = ctx.serviceLocator.GetRequired<services::SaveStateService>();
+        constexpr std::size_t slotIndex = services::SaveStateService::kAutoSlot;
+
+        if (!ctx.state.loadedDiscImagePath.empty()) {
+            {
+                auto lock = std::unique_lock{saves.SlotMutex(slotIndex)};
+                auto *slot = saves.Push(slotIndex);
+                if (slot != nullptr) {
+                    ctx.saturn.instance->SaveState(*slot->state);
+                    slot->timestamp = std::chrono::system_clock::now();
+                }
+            }
+            // (written here, not by the GUI thread: it may not get to run again before the app is suspended)
+            saves.PersistSaveState(slotIndex);
+        }
+        if (done) {
+            done();
+        }
     });
 }
 

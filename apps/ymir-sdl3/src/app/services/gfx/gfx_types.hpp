@@ -117,6 +117,25 @@ enum class PresentMode {
     NoSync,   ///< Presents frames without synchronization.
 };
 
+/// @brief Upscalers that can be applied to the emulated video output before it is displayed.
+enum class UpscaleMode {
+    Off,      ///< No upscaling beyond the usual texture filtering.
+    Spatial,  ///< Single-frame upscaling (MetalFX spatial scaler).
+    Temporal, ///< Upscaling that also uses previous frames (MetalFX temporal scaler).
+};
+
+/// @brief Filters applied to the emulated video output when it is scaled for display.
+struct PostProcessParams {
+    float sharpness = 0.0f; ///< Sharpening amount, 0.0 to 1.0.
+    float scanlines = 0.0f; ///< CRT scanline strength, 0.0 to 1.0.
+    float mask = 0.0f;      ///< CRT aperture grille strength, 0.0 to 1.0.
+    bool sharpPixels = false; ///< Scale with crisp pixel edges and smoothing only along the borders between pixels.
+
+    bool AnyActive() const {
+        return sharpness > 0.0f || scanlines > 0.0f || mask > 0.0f || sharpPixels;
+    }
+};
+
 /// @brief Possible outcomes of a frame presentation action.
 enum class PresentResult {
     /// @brief The frame was presented successfully.
@@ -241,6 +260,9 @@ struct DisplayTextureSpec {
 
     /// @brief The height of the display contained in the texture.
     uint32 height;
+
+    /// @brief The internal resolution scale of the image: it covers (width * scale) x (height * scale) texels.
+    uint32 scale = 1;
 };
 
 } // namespace app::gfx

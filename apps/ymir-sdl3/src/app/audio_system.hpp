@@ -8,6 +8,7 @@
 
 #include <array>
 #include <atomic>
+#include <cmath>
 #include <span>
 
 namespace app {
@@ -85,6 +86,15 @@ public:
         return m_buffer.size();
     }
 
+    /// Plays the sound slightly faster (ratio > 1) or slower than it is produced. Used when frames are paced by the
+    /// display, which makes emulation run a little faster or slower than the real Saturn.
+    void SetSpeedRatio(double ratio) {
+        if (m_audioStream != nullptr && std::abs(ratio - m_speedRatio) >= 0.0002) {
+            m_speedRatio = ratio;
+            SDL_SetAudioStreamFrequencyRatio(m_audioStream, (float)ratio);
+        }
+    }
+
 private:
     SDL_AudioStream *m_audioStream = nullptr;
     bool m_running = false;
@@ -98,6 +108,7 @@ private:
     std::atomic_bool m_silent = false;
 
     float m_gain = 0.8f;
+    double m_speedRatio = 1.0;
     bool m_mute = false;
 
     void UpdateGain();

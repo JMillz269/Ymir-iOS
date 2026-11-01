@@ -136,6 +136,7 @@ std::unique_ptr<ymir::savestate::SaveState> SaveStateService::PopUndoLoadState()
 
 void SaveStateService::LoadSaveStates() {
     WriteSaveStateMeta();
+    WriteGameLink();
 
     auto basePath = m_context.profile.GetPath(app::ProfilePath::SaveStates);
     auto gameStatesPath = basePath / ymir::ToString(m_context.saturn.instance->GetDiscHash());
@@ -200,8 +201,47 @@ void SaveStateService::ClearSaveStates() {
 
         std::filesystem::remove(gameStatesPath / fmt::format("{}.savestate", slotIndex));
         std::filesystem::remove(gameStatesPath / fmt::format("{}-1.savestate", slotIndex));
+        std::error_code error{};
+        std::filesystem::remove(gameStatesPath / fmt::format("{}.jpg", slotIndex), error);
     }
     m_context.DisplayMessage("All save states cleared");
+}
+
+void SaveStateService::DeleteSaveStateSlot(std::size_t slotIndex) {
+    if (!IsValidIndex(slotIndex)) {
+        return;
+    }
+    {
+        auto lock = std::unique_lock{SlotMutex(slotIndex)};
+        Erase(slotIndex);
+    }
+
+    auto basePath = m_context.profile.GetPath(app::ProfilePath::SaveStates);
+    auto gameStatesPath = basePath / ymir::ToString(m_context.saturn.instance->GetDiscHash());
+    std::error_code error{};
+    std::filesystem::remove(gameStatesPath / fmt::format("{}.savestate", slotIndex), error);
+    std::filesystem::remove(gameStatesPath / fmt::format("{}-1.savestate", slotIndex), error);
+    std::filesystem::remove(gameStatesPath / fmt::format("{}.jpg", slotIndex), error);
+    m_context.DisplayMessage(fmt::format("State {} deleted", slotIndex + 1));
+}
+
+std::filesystem::path SaveStateService::SaveStateSlotPath(std::size_t slotIndex) const {
+    if (!IsValidIndex(slotIndex)) {
+        return {};
+    }
+    auto basePath = m_context.profile.GetPath(app::ProfilePath::SaveStates);
+    auto statePath = basePath / ymir::ToString(m_context.saturn.instance->GetDiscHash()) /
+                     fmt::format("{}.savestate", slotIndex);
+    std::error_code error{};
+    return std::filesystem::is_regular_file(statePath, error) ? statePath : std::filesystem::path{};
+}
+
+std::filesystem::path SaveStateService::ThumbnailPath(std::size_t slotIndex) const {
+    if (!IsValidIndex(slotIndex)) {
+        return {};
+    }
+    auto basePath = m_context.profile.GetPath(app::ProfilePath::SaveStates);
+    return basePath / ymir::ToString(m_context.saturn.instance->GetDiscHash()) / fmt::format("{}.jpg", slotIndex);
 }
 
 void SaveStateService::LoadSaveStateSlot(std::size_t slotIndex) {
@@ -251,8 +291,49 @@ void SaveStateService::PersistSaveState(std::size_t slotIndex) {
             save(slot->primary.state, fmt::format("{}.savestate", slotIndex));
             save(slot->backup.state, fmt::format("{}-1.savestate", slotIndex));
             WriteSaveStateMeta();
-            m_context.DisplayMessage(fmt::format("State {} saved", slotIndex + 1));
+            WriteGameLink();
+            if (slotIndex != kAutoSlot) {
+                m_context.DisplayMessage(fmt::format("State {} saved", slotIndex + 1));
+            }
         }
+    }
+}
+
+void SaveStateService::WriteGameLink() {
+    const std::filesystem::path image = m_context.state.loadedDiscImagePath;
+    if (image.empty()) {
+        return;
+    }
+
+    auto basePath = m_context.profile.GetPath(app::ProfilePath::SaveStates);
+    auto gameStatesPath = basePath / ymir::ToString(m_context.saturn.instance->GetDiscHash());
+
+    // (the profile folder is the one the save states folder is in)
+    std::filesystem::path saveStatesFolder = basePath.lexically_normal();
+    if (!saveStatesFolder.has_filename()) {
+        saveStatesFolder = saveStatesFolder.parent_path();
+    }
+    const std::filesystem::path profileFolder = saveStatesFolder.parent_path();
+    std::filesystem::path linked = image.lexically_normal().lexically_relative(profileFolder);
+    if (linked.empty() || *linked.begin() == "..") {
+        linked = image;
+    }
+    const std::string text = linked.generic_string();
+
+    const auto linkPath = gameStatesPath / "game.txt";
+    std::error_code error{};
+    if (std::filesystem::is_regular_file(linkPath, error)) {
+        std::ifstream in{linkPath};
+        std::string current;
+        std::getline(in, current);
+        if (current == text) {
+            return;
+        }
+    }
+    std::filesystem::create_directories(gameStatesPath, error);
+    std::ofstream out{linkPath};
+    if (out) {
+        out << text << "\n";
     }
 }
 

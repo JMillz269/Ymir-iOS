@@ -1,4 +1,7 @@
 #include <ymir/hw/sh2/sh2.hpp>
+#include <ymir/hw/sh2/sh2_recompiler.hpp>
+
+#include <bit>
 
 #include <ymir/util/bit_ops.hpp>
 #include <ymir/util/data_ops.hpp>
@@ -328,6 +331,8 @@ SH2::SH2(sys::SH2Bus &bus, bool master)
 }
 
 void SH2::Reset(bool hard, bool watchdogInitiated) {
+    FlushRecompiler();
+
     // Initial values:
     // - R0-R14 = undefined
     // - R15 = ReadLong(0x00000004)  [NOTE: ignores VBR]
@@ -454,10 +459,55 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
         }
     }
 
+    // The recompiler only handles the simple model: no debug tracing and no cache emulation
+    const bool useRecompiler = !debug && !emulateCache && *m_useRecompiler && !m_recompilerUnavailable;
+
+    // Idle detection: a slice spent entirely in recompiled code that wrote nothing to memory, called no interpreter
+    // handler and ended with every register as it started means the CPU is waiting for something outside
+    struct IdleState {
+        std::array<uint32, 16> R;
+        uint32 PC, PR, GBR, VBR, SR;
+        uint64 MAC;
+        bool operator==(const IdleState &) const = default;
+    };
+    bool trackIdle = false;
+    bool idleCandidate = false;
+    IdleState idleBefore{};
+    auto captureIdle = [&] { return IdleState{R, PC, PR, GBR, VBR, SR.u32, MAC.u64}; };
+    if (useRecompiler) {
+        if (SH2Recompiler::IdleDetectionEnabled()) {
+            if (m_idleStreak != 0 || m_idleBackoff == 0) {
+                trackIdle = true;
+                idleBefore = captureIdle();
+                m_jitImpure = false;
+            } else {
+                --m_idleBackoff;
+            }
+        } else {
+            m_idleStreak = 0;
+        }
+    } else {
+        // The interpreter doesn't detect waiting; forget a streak left over from recompiled code
+        m_idleStreak = 0;
+    }
+
+    bool iterated = false;
     while (m_cyclesExecuted < cycles) {
         // [[maybe_unused]] const uint32 prevPC = PC; // debug aid
+        iterated = true;
 
-        // TODO: choose between interpreter (cached or uncached) and JIT recompiler
+        if constexpr (!debug && !emulateCache) {
+            if (useRecompiler) {
+                const uint64 jitCycles = RunRecompiledBlock(cycles - m_cyclesExecuted);
+                if (jitCycles != 0) {
+                    m_cyclesExecuted += jitCycles;
+                    idleCandidate = true;
+                    continue;
+                }
+            }
+        }
+
+        m_jitImpure = true;
         m_cyclesExecuted += InterpretNext<debug, emulateCache>();
 
         // Check for breakpoints and watchpoints and validate PC in debug tracing mode
@@ -506,6 +556,24 @@ FLATTEN uint64 SH2::Advance(uint64 cycles, uint64 spilloverCycles) {
                 // TODO: trace event
             }
         }
+    }
+    if (trackIdle && !iterated) {
+        // Nothing was executed in this slice (the CPU was already ahead of the others): nothing to learn
+    } else if (trackIdle && idleCandidate) {
+        if (!m_jitImpure && captureIdle() == idleBefore) {
+            if (m_idleStreak < 255) {
+                ++m_idleStreak;
+            }
+            m_idleBackoff = 0;
+            SH2Recompiler::s_idleSlices.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            m_idleStreak = 0;
+            m_idleBackoff = 3;
+        }
+    } else if (trackIdle) {
+        // The slice used the interpreter only
+        m_idleStreak = 0;
+        m_idleBackoff = 3;
     }
     AdvanceDMA<debug, emulateCache>(m_cyclesExecuted - spilloverCycles);
     return m_cyclesExecuted;
@@ -629,6 +697,8 @@ void SH2::LoadState(const savestate::SH2SaveState &state) {
 }
 
 void SH2::PostLoadState(const savestate::SH2SaveState &state) {
+    FlushRecompiler();
+
     if (state.forceFetchOpcodes) {
         if (*m_emulateCache) {
             RefillPipeline<true>();
@@ -2246,6 +2316,11 @@ FORCE_INLINE_EX uint64 SH2::InterpretNext() {
     const OpcodeType opcode = DecodeTable::s_instance.opcodes[m_delaySlot][instr];
 
     // TODO: check program execution
+    return ExecuteOpcode<debug, emulateCache>(opcode, instr);
+}
+
+template <bool debug, bool emulateCache>
+FORCE_INLINE_EX uint64 SH2::ExecuteOpcode(OpcodeType opcode, uint16 instr) {
     switch (opcode) {
     case OpcodeType::NOP: return NOP<debug, emulateCache, false>();
 
@@ -2548,6 +2623,51 @@ FORCE_INLINE_EX uint64 SH2::InterpretNext() {
     }
 
     util::unreachable();
+}
+
+uint64 SH2::JitStep(uint16 instr) {
+    const OpcodeType opcode = DecodeTable::s_instance.opcodes[m_delaySlot][instr];
+    return ExecuteOpcode<false, false>(opcode, instr);
+}
+
+uint64 SH2::JitCyclesToTimerStep(uint32 address) const {
+    const uint64 now = GetCurrentCycleCount();
+    if (address >= 0xFFFFFE10u && address <= 0xFFFFFE19u) {
+        return FRT.CyclesUntilNextStep(now);
+    }
+    if (address >= 0xFFFFFE80u && address <= 0xFFFFFE8Fu) {
+        return WDT.CyclesUntilNextStep(now);
+    }
+    return 0;
+}
+
+uint64 SH2::RunRecompiledBlock(uint64 cyclesLeft) {
+    // Blocks start on instruction boundaries only, with no interrupt pending (it could become serviceable right after
+    // the first instruction, which only the interpreter's loop notices)
+    if (m_delaySlot || m_sleep || m_intrFlags.pending) {
+        return 0;
+    }
+
+    if (!m_recompiler) {
+        m_recompiler = std::make_shared<SH2Recompiler>(*this, m_bus);
+        if (!m_recompiler->IsUsable()) {
+            m_recompiler.reset();
+            m_recompilerUnavailable = true;
+            return 0;
+        }
+    }
+
+    return m_recompiler->Run(cyclesLeft);
+}
+
+void SH2::JitRefillPipeline() {
+    RefillPipeline<false>();
+}
+
+void SH2::FlushRecompiler() {
+    if (m_recompiler) {
+        m_recompiler->Flush();
+    }
 }
 
 template uint64 SH2::InterpretNext<false, false>();

@@ -102,6 +102,8 @@ EmuEvent SetAreaCode(uint8 areaCode);
 
 EmuEvent SetDeinterlace(bool enable);
 EmuEvent SetTransparentMeshes(bool enable);
+EmuEvent SetInternalResolution(uint32 scale);
+EmuEvent SetSkipNativeVDP1(bool skip);
 
 EmuEvent UseNullVDPRenderer(util::Event &event);
 EmuEvent SwitchVDPRenderer(bool verbose = true);
@@ -138,6 +140,9 @@ EmuEvent SetSCSPStepGranularity(uint32 granularity);
 
 EmuEvent LoadState(uint32 slotIndex);
 EmuEvent SaveState(uint32 slotIndex);
+/// Saves a state of the game that is loaded into the autosave slot and writes it to its file. Calls `done` (if set) on
+/// the emulator thread once that's finished, or right away if there was nothing to save.
+EmuEvent AutoSaveState(std::function<void()> done);
 EmuEvent UndoSaveState();
 EmuEvent UndoLoadState();
 

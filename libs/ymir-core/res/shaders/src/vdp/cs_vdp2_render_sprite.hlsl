@@ -7,6 +7,10 @@
 #include "util/bit_ops.hlsli"
 #include "util/data_ops.hlsli"
 
+// With SPRITE_FUSED defined, this file only provides the functions that draw the sprite layer (for the scaled up
+// composition, which draws the sprite layer of every sub-pixel itself and declares the resources with these names).
+// With HR_SPRITE defined, the sprite data is read from the scaled up framebuffers.
+#ifndef SPRITE_FUSED
 cbuffer CommonRenderParamsBuffer : register(b0) {
     CommonRenderParams g_commonParams;
 }
@@ -19,6 +23,7 @@ ByteAddressBuffer g_spriteFB : register(t5);
 
 RWTexture2DArray<uint4> g_layerOut : register(u1);
 RWTexture2DArray<uint> g_spriteAttrsOut : register(u2);
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Parameters
@@ -42,6 +47,14 @@ static const bool useSpriteWindow = BitTest(g_commonParams.spriteParams, 20);
 static const uint spriteDisplayFB = BitExtract(g_commonParams.spriteParams, 23, 1);
 
 static const bool deinterlace = BitTest(g_commonParams.enhancements, 0);
+static const bool transparentMeshes = BitTest(g_commonParams.enhancements, 1);
+
+#ifdef HR_SPRITE
+static const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
+// The sub-pixel the thread works on, within the native pixel
+static uint g_hrSubX;
+static uint g_hrSubY;
+#endif
 
 static const uint colorRAMMode = BitExtract(g_commonParams.displayParams, 6, 2);
 static const uint kCRAMAddressMask = colorRAMMode == 1 ? 0x7FF : 0x3FF;
@@ -66,9 +79,29 @@ uint ReadSprite8(uint address, uint field) {
     return BitExtract(g_spriteFB.Load(address & ~3), (address & 3) * 8, 8);
 }
 
+#ifdef HR_SPRITE
+// Internal resolution variant: g_spriteFB holds the scaled up framebuffers (two of 512x256 16-bit pixels, scaled, and
+// the two transparent mesh framebuffers after them), and every read is of the sub-pixel the thread works on of the
+// native pixel the address is for.
+uint ReadHRSprite16(uint address, uint base) {
+    const uint pixel = address >> 1;
+    const uint nativeX = pixel % fbSize.x;
+    const uint nativeY = pixel / fbSize.x;
+    const uint hrX = nativeX * hrScale + g_hrSubX;
+    const uint hrY = nativeY * hrScale + g_hrSubY;
+    const uint hrAddress =
+        base + spriteDisplayFB * kVDP1FBRAMSize * hrScale * hrScale + (hrY * fbSize.x * hrScale + hrX) * 2;
+    return ByteSwap16(g_spriteFB.Load(hrAddress & ~3) >> ((hrAddress & 2) * 8));
+}
+#endif
+
 uint ReadSprite16(uint address, uint field) {
+#ifdef HR_SPRITE
+    return ReadHRSprite16(address, 0);
+#else
     address += kSpriteFBBaseOffset + field * kDeinterlaceFBBaseOffset;
     return ByteSwap16(g_spriteFB.Load(address & ~3) >> ((address & 2) * 8));
+#endif
 }
 
 uint ReadMesh8(uint address, uint field) {
@@ -76,7 +109,11 @@ uint ReadMesh8(uint address, uint field) {
 }
 
 uint ReadMesh16(uint address, uint field) {
+#ifdef HR_SPRITE
+    return ReadHRSprite16(address, kVDP1FBRAMSize * 2 * hrScale * hrScale);
+#else
     return ReadSprite16(kVDP1MeshFBOffset + address, field);
+#endif
 }
 
 uint ReadVRAM16(uint address) {
@@ -521,19 +558,48 @@ SpriteOutput DrawSprite(uint2 pos, uint2 outPos, uint index) {
     return output;
 }
 
+// The sprite attributes of an output, as the composition reads them
+uint SpriteAttrs(SpriteOutput output) {
+    return output.colorCalcRatio |
+           ((output.colorMSB ? 1u : 0u) << kSpriteAttrBitColorMSB) |
+           ((output.shadowOrWindow ? 1u : 0u) << kSpriteAttrBitShadowWindow) |
+           (output.special << kSpriteAttrBitSpecial);
+}
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Entrypoint
 
 // TODO: 32 threads might be suboptimal on AMD GPUs
+#ifdef HR_SPRITE
+// Whether the sprite data of the pixel in this plane differs from the native sprite data. Pixels that don't come out
+// the same as the native image, which is composed already, so they are skipped.
+bool HRPixelDiffers(uint2 pos) {
+    if (rotate || inHalfResH || outHalfResH || (deinterlace && interlaceMode >= kInterlaceModeSingleDensity)) {
+        return true;
+    }
+    const uint address = (pos.x + pos.y * fbSize.x) * 2;
+    const uint nativeAddress = address + kSpriteFBBaseOffset;
+    const uint nativeWord = ByteSwap16(g_spriteFBNative.Load(nativeAddress & ~3) >> ((nativeAddress & 2) * 8));
+    if (nativeWord != ReadSprite16(address, 0)) {
+        return true;
+    }
+    if (transparentMeshes) {
+        const uint nativeMeshAddress = nativeAddress + kVDP1MeshFBOffset;
+        const uint nativeMeshWord =
+            ByteSwap16(g_spriteFBNative.Load(nativeMeshAddress & ~3) >> ((nativeMeshAddress & 2) * 8));
+        return nativeMeshWord != ReadMesh16(address, 0);
+    }
+    return false;
+}
+#endif
+
+#ifndef SPRITE_FUSED
 [numthreads(32, 1, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);
     const uint2 outCoord = uint2(drawCoord.x, GetY(drawCoord.y));
     const SpriteOutput output = DrawSprite(drawCoord, outCoord.xy, id.z);
     g_layerOut[uint3(outCoord.xy, id.z + 6)] = output.layer;
-    g_spriteAttrsOut[uint3(outCoord.xy, id.z)] =
-        output.colorCalcRatio |
-        ((output.colorMSB ? 1u : 0u) << kSpriteAttrBitColorMSB) |
-        ((output.shadowOrWindow ? 1u : 0u) << kSpriteAttrBitShadowWindow) |
-        (output.special << kSpriteAttrBitSpecial);
+    g_spriteAttrsOut[uint3(outCoord.xy, id.z)] = SpriteAttrs(output);
 }
+#endif

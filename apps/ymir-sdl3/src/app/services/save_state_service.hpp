@@ -9,6 +9,7 @@
 #include <app/shared_context.hpp>
 
 #include <array>
+#include <filesystem>
 #include <mutex>
 #include <vector>
 
@@ -16,8 +17,11 @@ namespace app::services {
 
 class SaveStateService {
 public:
-    // Static slot limit of ten slots for now
-    static constexpr std::size_t kSlots = 10;
+    // Static slot limit of ten slots for now, and one more that the frontend fills by itself when the player leaves a game
+    // (the iOS app's autosave; it isn't in the menus)
+    static constexpr std::size_t kUserSlots = 10;
+    static constexpr std::size_t kAutoSlot = kUserSlots;
+    static constexpr std::size_t kSlots = kUserSlots + 1;
     using SlotArray = std::array<savestates::Slot, kSlots>; // type alias for private member
 
     SaveStateService(SharedContext &context, Settings &settings);
@@ -110,6 +114,15 @@ public:
     /// @brief Deletes all save states for the current game from disk and memory.
     void ClearSaveStates();
 
+    /// @brief Deletes the save state of a slot (and its backup) for the current game, from memory and from disk.
+    /// @param[in] slotIndex Slot index.
+    void DeleteSaveStateSlot(std::size_t slotIndex);
+
+    /// @brief Retrieves the file the save state of a slot of the current game is stored in.
+    /// @param[in] slotIndex Slot index.
+    /// @return the path of the file, or an empty path if there is no such file
+    [[nodiscard]] std::filesystem::path SaveStateSlotPath(std::size_t slotIndex) const;
+
     /// @brief Loads a save state from the given slot.
     /// @param[in] slotIndex Slot index.
     void LoadSaveStateSlot(std::size_t slotIndex);
@@ -128,6 +141,17 @@ public:
 
     /// @brief Writes a metadata text file next to the save states on disk.
     void WriteSaveStateMeta();
+
+    /// @brief Notes which disc image the save states of the current game belong to, in `game.txt` next to them: the
+    /// path of the image relative to the profile folder (or the full path if it's elsewhere). The save state folders
+    /// are named after a hash of the disc, which can't be worked out without loading the disc, so this is how a list of
+    /// every game's save states (the save state manager of the iOS app) tells whose they are.
+    void WriteGameLink();
+
+    /// @brief Retrieves the file the thumbnail of a slot of the current game is stored in (it may not exist).
+    /// @param[in] slotIndex Slot index.
+    /// @return the path of the file, or an empty path if the index is out of range
+    [[nodiscard]] std::filesystem::path ThumbnailPath(std::size_t slotIndex) const;
 
     /// @brief Loads saved debugger breakpoints and watchpoints from disk.
     void LoadDebuggerState();

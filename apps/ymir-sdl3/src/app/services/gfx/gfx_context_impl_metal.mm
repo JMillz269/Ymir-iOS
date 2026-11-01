@@ -7,11 +7,26 @@
 
 #include <ymir/util/string.hpp>
 
+#include <ymir/hw/vdp/renderer/vdp_renderer_hw_metal.hpp>
+#include <ymir/util/perf_counters.hpp>
+
 #include <backends/imgui_impl_metal.h>
 #include <backends/imgui_impl_sdl3.h>
 
 #import <Metal/Metal.h>
 #import <QuartzCore/CAMetalLayer.h>
+#import <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+    #import <UIKit/UIKit.h>
+#endif
+
+// MetalFX upscaling is only used on iOS
+#if TARGET_OS_IOS && __has_include(<MetalFX/MetalFX.h>)
+    #import <MetalFX/MetalFX.h>
+    #define YMIR_HAS_METALFX 1
+#else
+    #define YMIR_HAS_METALFX 0
+#endif
 
 #include <SDL3/SDL.h>
 #include <fmt/format.h>
@@ -19,9 +34,21 @@
 #include <cmrc/cmrc.hpp>
 CMRC_DECLARE(ymir_sdl3_shaders);
 
+#include <algorithm>
+#include <array>
+#include <cstring>
+#include <optional>
+#include <cmath>
 #include <deque>
+#include <memory>
+#include <mutex>
 
 using namespace ymir::gpu;
+
+namespace ymir::vdp::metal {
+// Shared with the Metal renderer: appends a line to metal-vdp-log.txt in the Documents folder
+void LogMessage(const char *format, ...) __attribute__((format(printf, 1, 2)));
+} // namespace ymir::vdp::metal
 
 namespace app::gfx {
 
@@ -62,6 +89,91 @@ struct Vertex {
     Float2 uv;
 };
 
+// Constants of the post-processing shader below. Must match the layout of Params in the shader source.
+struct alignas(16) PostConstants {
+    Float4 srcRect; // normalized
+    Float4 dstRect; // pixels
+    Float2 renderTargetSize;
+    Float2 contentSize; // size of the source region, in texels
+    float sharpness;
+    float scanlines;
+    float mask;
+    float sharpK; // > 0 enables sharp pixel scaling; the number of destination pixels per source pixel
+};
+
+static const char *kPostProcessShaderSource = R"MSL(
+#include <metal_stdlib>
+using namespace metal;
+
+struct Params {
+    float4 srcRect;
+    float4 dstRect;
+    float2 rtSize;
+    float2 contentSize;
+    float sharpness;
+    float scanlines;
+    float mask;
+    float sharpK;
+};
+
+struct VOut {
+    float4 position [[position]];
+    float2 uv;
+};
+
+vertex VOut ymir_post_vs(uint vid [[vertex_id]], constant Params &p [[buffer(0)]]) {
+    float2 corner = float2(float(vid & 1u), float(vid >> 1));
+    float2 px = p.dstRect.xy + corner * p.dstRect.zw;
+    VOut o;
+    o.position = float4(px.x / p.rtSize.x * 2.0 - 1.0, 1.0 - px.y / p.rtSize.y * 2.0, 0.0, 1.0);
+    o.uv = p.srcRect.xy + corner * p.srcRect.zw;
+    return o;
+}
+
+fragment float4 ymir_post_fs(VOut in [[stage_in]], texture2d<float> tex [[texture(0)]], sampler smp [[sampler(0)]],
+                             constant Params &p [[buffer(0)]]) {
+    float2 uv = in.uv;
+    float2 srcPos = (uv - p.srcRect.xy) / p.srcRect.zw; // 0..1 across the source region
+
+    if (p.sharpK > 0.0) {
+        // Keep the middle of every source pixel flat and only blend across the border to the next one
+        float2 pos = srcPos * p.contentSize;
+        float2 base = floor(pos);
+        float2 f = clamp((fract(pos) - 0.5) * p.sharpK + 0.5, 0.0, 1.0);
+        uv = p.srcRect.xy + ((base + f) / p.contentSize) * p.srcRect.zw;
+    }
+
+    float3 c = tex.sample(smp, uv).rgb;
+
+    if (p.sharpness > 0.0) {
+        float2 texel = 1.0 / float2(tex.get_width(), tex.get_height());
+        float3 blur = tex.sample(smp, uv + float2(texel.x, 0.0)).rgb + tex.sample(smp, uv - float2(texel.x, 0.0)).rgb +
+                      tex.sample(smp, uv + float2(0.0, texel.y)).rgb + tex.sample(smp, uv - float2(0.0, texel.y)).rgb;
+        blur *= 0.25;
+        c = clamp(c + (c - blur) * p.sharpness * 2.0, 0.0, 1.0);
+    }
+
+    if (p.scanlines > 0.0) {
+        // Bright in the middle of each source row, darker toward the gap between rows
+        float y = fract(srcPos.y * p.contentSize.y);
+        float beam = 1.0 - pow(abs(y * 2.0 - 1.0), 3.0);
+        float w = mix(1.0, 0.25 + 0.75 * beam, p.scanlines);
+        c *= w * mix(1.0, 1.2, p.scanlines); // brighten a little to make up for the dark gaps
+    }
+
+    if (p.mask > 0.0) {
+        // Aperture grille: red, green and blue stripes, three pixels per triad
+        uint col = uint(in.position.x) % 3u;
+        const float dim = 0.55;
+        float3 stripe = float3(col == 0u ? 1.0 : dim, col == 1u ? 1.0 : dim, col == 2u ? 1.0 : dim);
+        stripe /= (1.0 + 2.0 * dim) / 3.0; // keep the overall brightness
+        c = mix(c, c * stripe, p.mask);
+    }
+
+    return float4(clamp(c, 0.0, 1.0), 1.0);
+}
+)MSL";
+
 struct alignas(16) DrawTextureConstants {
     Float4 srcRect;
     Float4 dstRect;
@@ -85,6 +197,130 @@ static MTLVertexDescriptor *CreateQuadVertexDescriptor() {
     vtxDesc.layouts[17].stepFunction = MTLVertexStepFunctionPerVertex;
     return vtxDesc;
 }
+
+// -----------------------------------------------------------------------------
+// Images handed over by the Metal VDP renderer on the GPU
+
+/// Three textures the Metal VDP renderer copies its finished images into in turn (see ymir::vdp::MetalDisplaySink),
+/// which the display draws from without the images going through the CPU. Two shared events order the two sides on the
+/// GPU: the renderer signals the number of each image once it's copied, and the display signals the number of the image
+/// it drew once it's done with it; the renderer only waits for that before writing over an image the display drew.
+class MetalDisplayFrames final : public ymir::vdp::MetalDisplaySink {
+public:
+    static constexpr uint32 kCount = 3;
+    // Large enough for the largest image: 704x512, or 352x256 at the highest internal resolution (4x)
+    static constexpr uint32 kWidth = 352 * 4;
+    static constexpr uint32 kHeight = 256 * 4;
+
+    explicit MetalDisplayFrames(id<MTLDevice> device)
+        : m_device(device) {
+        m_readyEvent = [device newSharedEvent];
+        m_releaseEvent = [device newSharedEvent];
+    }
+
+    /// An image the display can draw
+    struct Frame {
+        id<MTLTexture> texture = nil;
+        uint32 slot = 0;
+        uint64 number = 0;
+        uint32 width = 0;
+        uint32 height = 0;
+        uint32 scale = 1;
+    };
+
+    bool AcquireTarget(uint32 width, uint32 height, uint32 scale, Target &target) override {
+        if (m_readyEvent == nil || m_releaseEvent == nil || width * scale > kWidth || height * scale > kHeight) {
+            return false;
+        }
+        std::lock_guard lock{m_mutex};
+        const uint64 number = m_nextNumber;
+        Slot &slot = m_slots[number % kCount];
+        if (slot.texture == nil) {
+            MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm
+                                                                                            width:kWidth
+                                                                                           height:kHeight
+                                                                                        mipmapped:NO];
+            desc.usage = MTLTextureUsageShaderRead;
+            desc.storageMode = MTLStorageModePrivate;
+            slot.texture = [m_device newTextureWithDescriptor:desc];
+            if (slot.texture == nil) {
+                return false;
+            }
+            slot.texture.label = @"[Ymir] Metal VDP renderer image";
+        }
+        ++m_nextNumber;
+
+        target = {};
+        if (slot.drawn) {
+            // The display drew the image this texture holds: wait until it's done with it
+            target.releaseEvent = (__bridge void *)m_releaseEvent;
+            target.releaseValue = slot.number;
+        }
+        slot.number = number;
+        slot.width = width;
+        slot.height = height;
+        slot.scale = scale;
+        slot.drawn = false;
+        target.texture = (__bridge void *)slot.texture;
+        target.readyEvent = (__bridge void *)m_readyEvent;
+        target.readyValue = number;
+        return true;
+    }
+
+    void TargetSubmitted(uint64 readyValue) override {
+        std::lock_guard lock{m_mutex};
+        m_submitted = std::max(m_submitted, readyValue);
+    }
+
+    /// Gets the latest image handed over, if any, and notes that the display draws it. The caller waits for the ready
+    /// event to reach its number before reading it and signals the release event with its number when done.
+    bool AcquireLatest(Frame &frame) {
+        std::lock_guard lock{m_mutex};
+        if (m_submitted == 0) {
+            return false;
+        }
+        const uint32 index = static_cast<uint32>(m_submitted % kCount);
+        Slot &slot = m_slots[index];
+        if (slot.number != m_submitted || slot.texture == nil) {
+            return false;
+        }
+        slot.drawn = true;
+        frame = {slot.texture, index, slot.number, slot.width, slot.height, slot.scale};
+        return true;
+    }
+
+    /// Stops offering the images handed over so far (when the renderer is replaced)
+    void Reset() {
+        std::lock_guard lock{m_mutex};
+        m_submitted = 0;
+    }
+
+    id<MTLSharedEvent> ReadyEvent() const {
+        return m_readyEvent;
+    }
+
+    id<MTLSharedEvent> ReleaseEvent() const {
+        return m_releaseEvent;
+    }
+
+private:
+    struct Slot {
+        id<MTLTexture> texture = nil;
+        uint64 number = 0;
+        uint32 width = 0;
+        uint32 height = 0;
+        uint32 scale = 1;
+        bool drawn = false; // the display drew this image (and signals the release event with its number when done)
+    };
+
+    id<MTLDevice> m_device = nil;
+    id<MTLSharedEvent> m_readyEvent = nil;
+    id<MTLSharedEvent> m_releaseEvent = nil;
+    std::mutex m_mutex;
+    std::array<Slot, kCount> m_slots{};
+    uint64 m_nextNumber = 1;
+    uint64 m_submitted = 0; // the latest image whose copy has been committed
+};
 
 // -----------------------------------------------------------------------------
 
@@ -124,6 +360,13 @@ struct MetalGraphicsContext::Impl {
 
     DrawTextureConstants drawTextureConstants;
 
+    // Images of the Metal VDP renderer, handed over on the GPU, with the IDs of their textures and the number of the
+    // one acquired for the frame being drawn (0 if none)
+    std::shared_ptr<MetalDisplayFrames> displayFrames;
+    std::array<TextureID, MetalDisplayFrames::kCount> displayFrameIDs{
+        kInvalidTextureID, kInvalidTextureID, kInvalidTextureID};
+    uint64 displayFrameDrawn = 0;
+
     id<CAMetalDrawable> currentDrawable = nil;
     id<MTLCommandBuffer> cmdListFrame = nil;
     id<MTLRenderCommandEncoder> renderEncoderFrame = nil;
@@ -138,6 +381,279 @@ struct MetalGraphicsContext::Impl {
     MTLScissorRect scissorRect{};
 
     PresentMode presentMode = PresentMode::VSync;
+    double frameRateHint = 0.0; // frames per second the app presents; 0 = unrestricted
+
+    // -- Presentation timing --
+
+    /// When the frames presented actually reached the screen; shared with the presented handlers of the drawables
+    struct PresentStats {
+        std::mutex mutex;
+        double lastShownTime = 0.0;
+        double expectedInterval = 0.0; ///< seconds each frame is meant to stay on the screen
+        uint32 frames = 0, skipped = 0, held = 0, early = 0;
+        double intervalSum = 0.0, worstInterval = 0.0;
+    };
+    std::shared_ptr<PresentStats> presentStats = std::make_shared<PresentStats>();
+
+    /// The display's maximum refresh rate (120 on ProMotion iPhones), 0 if unknown
+    static double DisplayRefreshRate() {
+#if TARGET_OS_IPHONE
+        return (double)[UIScreen mainScreen].maximumFramesPerSecond;
+#else
+        return 0.0;
+#endif
+    }
+
+    /// How long a frame must stay on the screen at least for frames to be shown at frameRateHint. Rounded to whole
+    /// display refreshes and then cut by half a refresh: asking for exactly 1/59.83 s on a 120 Hz display (16.71 ms,
+    /// just over two refreshes of 8.33 ms) would hold a frame for a third refresh.
+    double MinimumFrameDuration(double *expected) const {
+        const double refresh = DisplayRefreshRate();
+        if (refresh <= 0.0) {
+            *expected = 1.0 / frameRateHint;
+            return 1.0 / frameRateHint;
+        }
+        const double ticks = std::max(1.0, std::round(refresh / frameRateHint));
+        *expected = ticks / refresh;
+        return (ticks - 0.5) / refresh;
+    }
+
+    // -- Post processing filters --
+
+    PostProcessParams postProcess;
+    id<MTLLibrary> postLibrary = nil;
+    bool postLibraryFailed = false;
+    std::unordered_map<MTLPixelFormat, id<MTLRenderPipelineState>> postPipelines;
+
+    id<MTLRenderPipelineState> GetPostPipeline(MTLPixelFormat format) {
+        auto it = postPipelines.find(format);
+        if (it != postPipelines.end()) {
+            return it->second;
+        }
+        if (postLibraryFailed) {
+            return nil;
+        }
+        if (postLibrary == nil) {
+            NSError *error = nil;
+            postLibrary = [device newLibraryWithSource:[NSString stringWithUTF8String:kPostProcessShaderSource]
+                                               options:nil
+                                                 error:&error];
+            if (postLibrary == nil) {
+                postLibraryFailed = true;
+                return nil;
+            }
+        }
+        MTLRenderPipelineDescriptor *desc = [MTLRenderPipelineDescriptor new];
+        desc.label = @"[Ymir-GCtx] Post-process pipeline";
+        desc.vertexFunction = [postLibrary newFunctionWithName:@"ymir_post_vs"];
+        desc.fragmentFunction = [postLibrary newFunctionWithName:@"ymir_post_fs"];
+        desc.colorAttachments[0].pixelFormat = format;
+        NSError *error = nil;
+        id<MTLRenderPipelineState> pso = [device newRenderPipelineStateWithDescriptor:desc error:&error];
+        if (pso == nil) {
+            postLibraryFailed = true;
+            return nil;
+        }
+        postPipelines[format] = pso;
+        return pso;
+    }
+
+    // -- MetalFX upscaling --
+
+    UpscaleMode upscaleMode = UpscaleMode::Off;
+
+    id<MTLTexture> fxInput = nil;  // copy of the emulated frame, exactly as large as the frame
+    id<MTLTexture> fxOutput = nil; // upscaled frame
+    id<MTLTexture> fxDepth = nil;  // temporal scaler only: constant depth
+    id<MTLTexture> fxMotion = nil; // temporal scaler only: no motion
+    id fxScaler = nil;             // id<MTLFXSpatialScaler> or id<MTLFXTemporalScaler>
+    UpscaleMode fxScalerMode = UpscaleMode::Off;
+    MTLPixelFormat fxFormat = MTLPixelFormatInvalid;
+    uint32 fxInWidth = 0, fxInHeight = 0, fxOutWidth = 0, fxOutHeight = 0;
+    bool fxNeedsClear = false;
+    bool fxResetHistory = true;
+
+    bool SupportsUpscaling() const {
+#if YMIR_HAS_METALFX
+        if (@available(iOS 16.0, *)) {
+            return [MTLFXSpatialScalerDescriptor supportsDevice:device] &&
+                   [MTLFXTemporalScalerDescriptor supportsDevice:device];
+        }
+#endif
+        return false;
+    }
+
+    void ReleaseUpscaler() {
+        fxInput = nil;
+        fxOutput = nil;
+        fxDepth = nil;
+        fxMotion = nil;
+        fxScaler = nil;
+        fxScalerMode = UpscaleMode::Off;
+        fxFormat = MTLPixelFormatInvalid;
+        fxInWidth = fxInHeight = fxOutWidth = fxOutHeight = 0;
+    }
+
+#if YMIR_HAS_METALFX
+    id<MTLTexture> NewPrivateTexture(MTLPixelFormat format, uint32 width, uint32 height, MTLTextureUsage usage,
+                                     NSString *label) API_AVAILABLE(ios(16.0)) {
+        MTLTextureDescriptor *desc = [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
+                                                                                        width:width
+                                                                                       height:height
+                                                                                    mipmapped:NO];
+        desc.usage = usage;
+        desc.storageMode = MTLStorageModePrivate;
+        id<MTLTexture> texture = [device newTextureWithDescriptor:desc];
+        texture.label = label;
+        return texture;
+    }
+
+    /// Makes sure that the scaler and its textures exist for the given sizes and the current upscale mode.
+    bool EnsureUpscaler(MTLPixelFormat format, uint32 inW, uint32 inH, uint32 outW, uint32 outH)
+        API_AVAILABLE(ios(16.0)) {
+        if (fxScaler != nil && fxScalerMode == upscaleMode && fxFormat == format && fxInWidth == inW &&
+            fxInHeight == inH && fxOutWidth == outW && fxOutHeight == outH) {
+            return true;
+        }
+        ReleaseUpscaler();
+
+        fxInput = NewPrivateTexture(format, inW, inH, MTLTextureUsageShaderRead, @"[Ymir-GCtx] MetalFX input");
+        fxOutput = NewPrivateTexture(format, outW, outH,
+                                     MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite,
+                                     @"[Ymir-GCtx] MetalFX output");
+        if (fxInput == nil || fxOutput == nil) {
+            ReleaseUpscaler();
+            return false;
+        }
+
+        if (upscaleMode == UpscaleMode::Temporal) {
+            MTLFXTemporalScalerDescriptor *desc = [MTLFXTemporalScalerDescriptor new];
+            desc.inputWidth = inW;
+            desc.inputHeight = inH;
+            desc.outputWidth = outW;
+            desc.outputHeight = outH;
+            desc.colorTextureFormat = format;
+            desc.depthTextureFormat = MTLPixelFormatDepth32Float;
+            desc.motionTextureFormat = MTLPixelFormatRG16Float;
+            desc.outputTextureFormat = format;
+            desc.autoExposureEnabled = NO;
+            fxScaler = [desc newTemporalScalerWithDevice:device];
+            if (fxScaler != nil) {
+                fxDepth = NewPrivateTexture(MTLPixelFormatDepth32Float, inW, inH,
+                                            MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead,
+                                            @"[Ymir-GCtx] MetalFX depth");
+                fxMotion = NewPrivateTexture(MTLPixelFormatRG16Float, inW, inH,
+                                             MTLTextureUsageRenderTarget | MTLTextureUsageShaderRead,
+                                             @"[Ymir-GCtx] MetalFX motion");
+                if (fxDepth == nil || fxMotion == nil) {
+                    fxScaler = nil;
+                } else {
+                    fxScalerMode = UpscaleMode::Temporal;
+                    fxNeedsClear = true;
+                    fxResetHistory = true;
+                }
+            }
+        }
+        if (fxScaler == nil) {
+            // Spatial mode, or a fallback if the temporal scaler could not be created
+            MTLFXSpatialScalerDescriptor *desc = [MTLFXSpatialScalerDescriptor new];
+            desc.inputWidth = inW;
+            desc.inputHeight = inH;
+            desc.outputWidth = outW;
+            desc.outputHeight = outH;
+            desc.colorTextureFormat = format;
+            desc.outputTextureFormat = format;
+            desc.colorProcessingMode = MTLFXSpatialScalerColorProcessingModePerceptual;
+            fxScaler = [desc newSpatialScalerWithDevice:device];
+            fxScalerMode = UpscaleMode::Spatial;
+        }
+        if (fxScaler == nil) {
+            ReleaseUpscaler();
+            return false;
+        }
+
+        fxFormat = format;
+        fxInWidth = inW;
+        fxInHeight = inH;
+        fxOutWidth = outW;
+        fxOutHeight = outH;
+        return true;
+    }
+#endif
+
+    /// Encodes the upscaling of the given region of a texture into the command buffer.
+    /// Returns the texture with the upscaled image, or nil if it can't be upscaled.
+    id<MTLTexture> EncodeUpscale(id<MTLCommandBuffer> cmdBuf, id<MTLTexture> src, const FRect &srcRect,
+                                 uint32 factor) {
+#if YMIR_HAS_METALFX
+        if (@available(iOS 16.0, *)) {
+            const uint32 inW = (uint32)srcRect.w;
+            const uint32 inH = (uint32)srcRect.h;
+            if (inW == 0 || inH == 0 || srcRect.x < 0 || srcRect.y < 0 || srcRect.x + inW > src.width ||
+                srcRect.y + inH > src.height) {
+                return nil;
+            }
+            if (!EnsureUpscaler(src.pixelFormat, inW, inH, inW * factor, inH * factor)) {
+                // Unsupported on this device or for this texture format: stop trying
+                upscaleMode = UpscaleMode::Off;
+                return nil;
+            }
+
+            // Copy the frame so that the scaler gets a texture of exactly the frame's size
+            id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+            [blit copyFromTexture:src
+                      sourceSlice:0
+                      sourceLevel:0
+                     sourceOrigin:MTLOriginMake((NSUInteger)srcRect.x, (NSUInteger)srcRect.y, 0)
+                       sourceSize:MTLSizeMake(inW, inH, 1)
+                        toTexture:fxInput
+                 destinationSlice:0
+                 destinationLevel:0
+                destinationOrigin:MTLOriginMake(0, 0, 0)];
+            [blit endEncoding];
+
+            if (fxScalerMode == UpscaleMode::Temporal) {
+                if (fxNeedsClear) {
+                    // The Saturn's video has no depth or motion information: use constant depth and zero motion
+                    MTLRenderPassDescriptor *pass = [MTLRenderPassDescriptor renderPassDescriptor];
+                    pass.colorAttachments[0].texture = fxMotion;
+                    pass.colorAttachments[0].loadAction = MTLLoadActionClear;
+                    pass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0);
+                    pass.colorAttachments[0].storeAction = MTLStoreActionStore;
+                    pass.depthAttachment.texture = fxDepth;
+                    pass.depthAttachment.loadAction = MTLLoadActionClear;
+                    pass.depthAttachment.clearDepth = 1.0;
+                    pass.depthAttachment.storeAction = MTLStoreActionStore;
+                    [[cmdBuf renderCommandEncoderWithDescriptor:pass] endEncoding];
+                    fxNeedsClear = false;
+                }
+
+                id<MTLFXTemporalScaler> scaler = (id<MTLFXTemporalScaler>)fxScaler;
+                scaler.colorTexture = fxInput;
+                scaler.depthTexture = fxDepth;
+                scaler.motionTexture = fxMotion;
+                scaler.outputTexture = fxOutput;
+                scaler.inputContentWidth = inW;
+                scaler.inputContentHeight = inH;
+                scaler.jitterOffsetX = 0.0f;
+                scaler.jitterOffsetY = 0.0f;
+                scaler.preExposure = 1.0f;
+                scaler.reset = fxResetHistory;
+                fxResetHistory = NO;
+                [scaler encodeToCommandBuffer:cmdBuf];
+            } else {
+                id<MTLFXSpatialScaler> scaler = (id<MTLFXSpatialScaler>)fxScaler;
+                scaler.colorTexture = fxInput;
+                scaler.outputTexture = fxOutput;
+                scaler.inputContentWidth = inW;
+                scaler.inputContentHeight = inH;
+                [scaler encodeToCommandBuffer:cmdBuf];
+            }
+            return fxOutput;
+        }
+#endif
+        return nil;
+    }
 
     struct TextureInstance {
         Texture2DSpec spec;
@@ -184,6 +700,7 @@ struct MetalGraphicsContext::Impl {
             if (device == nil) {
                 return util::ErrorMessage{"Failed to create Metal device"};
             }
+            displayFrames = std::make_shared<MetalDisplayFrames>(device);
 
             if (![device supportsFamily:static_cast<MTLGPUFamily>(spec.featureLevel)]) {
                 return util::ErrorMessage{"Metal device does not support requested feature level"};
@@ -202,7 +719,9 @@ struct MetalGraphicsContext::Impl {
             metalLayer.device = device;
             metalLayer.pixelFormat = MTLPixelFormatBGRA8Unorm;
             metalLayer.framebufferOnly = YES;
+#if TARGET_OS_OSX
             metalLayer.displaySyncEnabled = (presentMode != PresentMode::NoSync);
+#endif // iOS drawables are always paced by the display
 
             int pxW = 0, pxH = 0;
             SDL_GetWindowSizeInPixels(spec.window, &pxW, &pxH);
@@ -372,7 +891,13 @@ struct MetalGraphicsContext::Impl {
 
     void Shutdown() {
         @autoreleasepool {
+            ReleaseDisplayFrame();
             WaitForGPU();
+            if (displayFrames) {
+                // (the renderer must never wait for a display that is gone)
+                displayFrames->ReleaseEvent().signaledValue = UINT64_MAX;
+                displayFrames->Reset();
+            }
             DeletePendingTextures(true);
 
             for (auto &[texID, tex] : textures) {
@@ -519,10 +1044,65 @@ struct MetalGraphicsContext::Impl {
             [renderEncoderFrame endEncoding];
             renderEncoderFrame = nil;
         }
+        // (an image of the renderer acquired for this frame is released with it at the latest)
+        ReleaseDisplayFrame();
 
         @autoreleasepool {
             if (currentDrawable != nil && cmdListFrame != nil) {
-                [cmdListFrame presentDrawable:currentDrawable];
+                double expected = 0.0;
+                const double minDuration = frameRateHint > 0.0 ? MinimumFrameDuration(&expected) : 0.0;
+                if (ymir::perf::detailedLog.load(std::memory_order_relaxed)) {
+                    {
+                        std::lock_guard lock{presentStats->mutex};
+                        presentStats->expectedInterval = expected;
+                    }
+                    std::shared_ptr<PresentStats> stats = presentStats;
+                    [currentDrawable addPresentedHandler:^(id<MTLDrawable> drawable) {
+                      const double shown = drawable.presentedTime;
+                      bool log = false;
+                      PresentStats &st = *stats;
+                      {
+                          std::lock_guard lock{st.mutex};
+                          if (shown <= 0.0) {
+                              ++st.skipped; // replaced by a newer frame before it could be shown
+                          } else {
+                              if (st.lastShownTime > 0.0 && st.expectedInterval > 0.0) {
+                                  const double interval = shown - st.lastShownTime;
+                                  ++st.frames;
+                                  st.intervalSum += interval;
+                                  st.worstInterval = std::max(st.worstInterval, interval);
+                                  if (interval > st.expectedInterval * 1.4) {
+                                      ++st.held; // the previous frame stayed on the screen longer than meant
+                                  } else if (interval < st.expectedInterval * 0.6) {
+                                      ++st.early;
+                                  }
+                                  log = st.frames >= 600;
+                              }
+                              st.lastShownTime = shown;
+                          }
+                          if (log) {
+                              ymir::vdp::metal::LogMessage(
+                                  "display: last %u frames on the screen every %.2f ms on average (meant %.2f ms), worst "
+                                  "%.2f ms; %u stayed up longer than meant, %u were replaced early, %u were never shown",
+                                  st.frames, st.intervalSum / st.frames * 1000.0, st.expectedInterval * 1000.0,
+                                  st.worstInterval * 1000.0, st.held, st.early, st.skipped);
+                              st.frames = st.held = st.early = st.skipped = 0;
+                              st.intervalSum = st.worstInterval = 0.0;
+                          }
+                      }
+                    }];
+                } else {
+                    // (measuring starts over when the performance log is turned on again)
+                    std::lock_guard lock{presentStats->mutex};
+                    presentStats->lastShownTime = 0.0;
+                }
+                if (frameRateHint > 0.0) {
+                    // Lets a variable refresh rate (ProMotion) display settle at the rate frames are produced at
+                    // instead of running at its maximum rate
+                    [cmdListFrame presentDrawable:currentDrawable afterMinimumDuration:minDuration];
+                } else {
+                    [cmdListFrame presentDrawable:currentDrawable];
+                }
 
                 dispatch_semaphore_t sem = frameSemaphore;
                 [cmdListFrame addCompletedHandler:^(id<MTLCommandBuffer>) {
@@ -783,8 +1363,60 @@ struct MetalGraphicsContext::Impl {
             rttPassDesc.colorAttachments[0].loadAction = MTLLoadActionLoad;
             rttPassDesc.colorAttachments[0].storeAction = MTLStoreActionStore;
 
-            id<MTLCommandBuffer> rttCmdBuf = [cmdQueue commandBuffer];
+            // Drawn in the frame's command buffer if there is one, ahead of what is drawn on screen; otherwise in a
+            // command buffer of its own, which is waited for
+            const bool ownCmdBuf = cmdListFrame == nil;
+            id<MTLCommandBuffer> rttCmdBuf = ownCmdBuf ? [cmdQueue commandBuffer] : cmdListFrame;
+
+            // Optionally upscale the source with MetalFX first, then scale the result into the destination
+            id<MTLTexture> srcResource = srcTexture->resource;
+            FRect effSrcRect = srcRect;
+            float srcTexWidth = (float)srcTexture->spec.width;
+            float srcTexHeight = (float)srcTexture->spec.height;
+            bool useNearest = srcTexture->spec.filterMode == TextureFilterMode::Nearest;
+            if (upscaleMode != UpscaleMode::Off && srcRect.w >= 1.0f && srcRect.h >= 1.0f && dstRect.w > srcRect.w) {
+                const uint32 factor = std::clamp<uint32>((uint32)std::lround(dstRect.w / srcRect.w), 2u, 3u);
+                if (id<MTLTexture> upscaled = EncodeUpscale(rttCmdBuf, srcTexture->resource, srcRect, factor)) {
+                    srcResource = upscaled;
+                    effSrcRect = {.x = 0.0f, .y = 0.0f, .w = (float)upscaled.width, .h = (float)upscaled.height};
+                    srcTexWidth = (float)upscaled.width;
+                    srcTexHeight = (float)upscaled.height;
+                    useNearest = false;
+                }
+            }
+
             id<MTLRenderCommandEncoder> rttEncoder = [rttCmdBuf renderCommandEncoderWithDescriptor:rttPassDesc];
+
+            // Use the filtering shader if any filter is on and it could be built
+            id<MTLRenderPipelineState> postPipeline =
+                postProcess.AnyActive() ? GetPostPipeline(dstTexture->resource.pixelFormat) : nil;
+            if (postPipeline != nil) {
+                PostConstants post{};
+                post.srcRect = {effSrcRect.x / srcTexWidth, effSrcRect.y / srcTexHeight, effSrcRect.w / srcTexWidth,
+                                effSrcRect.h / srcTexHeight};
+                post.dstRect = {dstRect.x, dstRect.y, dstRect.w, dstRect.h};
+                post.renderTargetSize = {(float)dstTexture->spec.width, (float)dstTexture->spec.height};
+                post.contentSize = {effSrcRect.w, effSrcRect.h};
+                post.sharpness = std::clamp(postProcess.sharpness, 0.0f, 1.0f);
+                post.scanlines = std::clamp(postProcess.scanlines, 0.0f, 1.0f);
+                post.mask = std::clamp(postProcess.mask, 0.0f, 1.0f);
+                post.sharpK = postProcess.sharpPixels ? std::max(1.0f, dstRect.w / std::max(effSrcRect.w, 1.0f)) : 0.0f;
+
+                [rttEncoder setRenderPipelineState:postPipeline];
+                [rttEncoder setVertexBytes:&post length:sizeof(post) atIndex:0];
+                [rttEncoder setFragmentBytes:&post length:sizeof(post) atIndex:0];
+                [rttEncoder setFragmentTexture:srcResource atIndex:0];
+                // Sharp pixel scaling needs bilinear filtering to blend the borders
+                [rttEncoder setFragmentSamplerState:((useNearest && !postProcess.sharpPixels) ? smpNearest : smpLinear)
+                                            atIndex:0];
+                [rttEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
+                [rttEncoder endEncoding];
+                if (ownCmdBuf) {
+                    [rttCmdBuf commit];
+                    [rttCmdBuf waitUntilCompleted];
+                }
+                return {};
+            }
 
             [rttEncoder setRenderPipelineState:pipeline->pipelineState];
             [rttEncoder setVertexBuffer:vertexBuffer offset:0 atIndex:17];
@@ -793,10 +1425,10 @@ struct MetalGraphicsContext::Impl {
             // render target size
             DrawTextureConstants consts{};
             consts.srcRect = {
-                srcRect.x / srcTexture->spec.width,
-                srcRect.y / srcTexture->spec.height,
-                srcRect.w / srcTexture->spec.width,
-                srcRect.h / srcTexture->spec.height,
+                effSrcRect.x / srcTexWidth,
+                effSrcRect.y / srcTexHeight,
+                effSrcRect.w / srcTexWidth,
+                effSrcRect.h / srcTexHeight,
             };
             consts.dstRect = {dstRect.x, dstRect.y, dstRect.w, dstRect.h};
             consts.renderTargetSize = {(float)dstTexture->spec.width, (float)dstTexture->spec.height};
@@ -804,16 +1436,16 @@ struct MetalGraphicsContext::Impl {
             consts.rotAngle = 0.0f;
 
             [rttEncoder setVertexBytes:&consts length:sizeof(consts) atIndex:0];
-            [rttEncoder setFragmentTexture:srcTexture->resource atIndex:0];
-            [rttEncoder setFragmentSamplerState:(srcTexture->spec.filterMode == TextureFilterMode::Nearest ? smpNearest
-                                                                                                           : smpLinear)
-                                        atIndex:0];
+            [rttEncoder setFragmentTexture:srcResource atIndex:0];
+            [rttEncoder setFragmentSamplerState:(useNearest ? smpNearest : smpLinear) atIndex:0];
 
             // Draw rectangle
             [rttEncoder drawPrimitives:MTLPrimitiveTypeTriangleStrip vertexStart:0 vertexCount:4];
             [rttEncoder endEncoding];
-            [rttCmdBuf commit];
-            [rttCmdBuf waitUntilCompleted];
+            if (ownCmdBuf) {
+                [rttCmdBuf commit];
+                [rttCmdBuf waitUntilCompleted];
+            }
         }
 
         return {};
@@ -875,6 +1507,124 @@ struct MetalGraphicsContext::Impl {
         }
 
         return {};
+    }
+
+    // -------------------------------------------------------------------------
+    // Images of the Metal VDP renderer
+
+    /// Raises the release event to the given number unless it's there already (the renderer waits for it)
+    void SignalReleaseOnCPU(uint64 number) {
+        id<MTLSharedEvent> event = displayFrames->ReleaseEvent();
+        if (event.signaledValue < number) {
+            event.signaledValue = number;
+        }
+    }
+
+    /// The texture ID under which the display draws the image texture of the given slot
+    TextureID DisplayFrameTextureID(const MetalDisplayFrames::Frame &frame) {
+        TextureID &id = displayFrameIDs[frame.slot];
+        auto it = id != kInvalidTextureID ? textures.find(id) : textures.end();
+        if (it == textures.end() || it->second.resource != frame.texture) {
+            if (id == kInvalidTextureID) {
+                id = texIDMgr.GetNextTextureID();
+            }
+            TextureInstance instance{};
+            instance.spec = {
+                .width = MetalDisplayFrames::kWidth,
+                .height = MetalDisplayFrames::kHeight,
+                .format = PixelFormat::R8G8B8A8_UNORM,
+                .access = TextureAccess::Static,
+                .filterMode = TextureFilterMode::Nearest,
+                .name = "[Ymir] Metal VDP renderer image",
+            };
+            instance.resource = frame.texture;
+            textures[id] = std::move(instance);
+        }
+        return id;
+    }
+
+    /// Gets the latest image of the Metal VDP renderer for the frame being drawn; the frame's command buffer waits on
+    /// the GPU for the image to be ready
+    std::optional<DisplayTextureSpec> AcquireDisplayFrame() {
+        if (!displayFrames) {
+            return std::nullopt;
+        }
+        ReleaseDisplayFrame();
+        MetalDisplayFrames::Frame frame{};
+        if (!displayFrames->AcquireLatest(frame)) {
+            return std::nullopt;
+        }
+        if (!BeginFrame() || cmdListFrame == nil) {
+            // Can't draw it this time; the renderer may write over it
+            SignalReleaseOnCPU(frame.number);
+            return std::nullopt;
+        }
+        if (renderEncoderFrame != nil) {
+            [renderEncoderFrame endEncoding];
+            renderEncoderFrame = nil;
+        }
+        [cmdListFrame encodeWaitForEvent:displayFrames->ReadyEvent() value:frame.number];
+        displayFrameDrawn = frame.number;
+        return DisplayTextureSpec{
+            .id = DisplayFrameTextureID(frame),
+            .width = frame.width,
+            .height = frame.height,
+            .scale = frame.scale,
+        };
+    }
+
+    /// Lets the renderer write over the image acquired for this frame once the GPU is done drawing it
+    void ReleaseDisplayFrame() {
+        if (displayFrameDrawn == 0 || !displayFrames) {
+            return;
+        }
+        if (renderEncoderFrame != nil) {
+            [renderEncoderFrame endEncoding];
+            renderEncoderFrame = nil;
+        }
+        if (cmdListFrame != nil) {
+            [cmdListFrame encodeSignalEvent:displayFrames->ReleaseEvent() value:displayFrameDrawn];
+        } else {
+            SignalReleaseOnCPU(displayFrameDrawn);
+        }
+        displayFrameDrawn = 0;
+    }
+
+    /// Copies the latest image of the Metal VDP renderer to memory, rows packed (for screenshots)
+    util::ValueResult<size_t> DownloadDisplayFrame(void *buffer, size_t size) {
+        MetalDisplayFrames::Frame frame{};
+        if (!displayFrames || !displayFrames->AcquireLatest(frame)) {
+            return util::ErrorMessage{"No image to download"};
+        }
+        const uint32 w = frame.width * frame.scale;
+        const uint32 h = frame.height * frame.scale;
+        const size_t bytes = size_t(w) * h * sizeof(uint32);
+        @autoreleasepool {
+            id<MTLBuffer> readback = [device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+            id<MTLCommandBuffer> cmdBuf = [cmdQueue commandBuffer];
+            if (readback == nil || cmdBuf == nil) {
+                SignalReleaseOnCPU(frame.number);
+                return util::ErrorMessage{"Could not allocate the download buffer"};
+            }
+            [cmdBuf encodeWaitForEvent:displayFrames->ReadyEvent() value:frame.number];
+            id<MTLBlitCommandEncoder> blit = [cmdBuf blitCommandEncoder];
+            [blit copyFromTexture:frame.texture
+                         sourceSlice:0
+                         sourceLevel:0
+                        sourceOrigin:MTLOriginMake(0, 0, 0)
+                          sourceSize:MTLSizeMake(w, h, 1)
+                            toBuffer:readback
+                   destinationOffset:0
+              destinationBytesPerRow:w * sizeof(uint32)
+            destinationBytesPerImage:bytes];
+            [blit endEncoding];
+            [cmdBuf encodeSignalEvent:displayFrames->ReleaseEvent() value:frame.number];
+            [cmdBuf commit];
+            [cmdBuf waitUntilCompleted];
+            const size_t copySize = std::min(size, bytes);
+            std::memcpy(buffer, [readback contents], copySize);
+            return copySize;
+        }
     }
 
     void ClearScreen(gfx::ColorRGBA color) {
@@ -1035,32 +1785,61 @@ util::VoidResult<> MetalGraphicsContext::DrawTextureRotated(TextureID textureID,
 }
 
 std::optional<DisplayTextureSpec> MetalGraphicsContext::AcquireCurrentDisplayOutputTexture() {
-    // TODO: find and update index of the latest complete display output texture, emit transition to copy destination
-    // barrier and return its texture ID, width and height
-    return std::nullopt;
+    return m_impl->AcquireDisplayFrame();
 }
 
 void MetalGraphicsContext::ReleaseCurrentDisplayOutputTexture() {
-    // TODO: if the display texture was previously acquired, emit a transition to pixel shading barrier and mark as
-    // released
+    m_impl->ReleaseDisplayFrame();
 }
 
 void MetalGraphicsContext::ResetDisplayOutputTextures() {
-    // TODO: clear display texture state
+    if (m_impl->displayFrames) {
+        m_impl->displayFrames->Reset();
+    }
 }
 
 util::ValueResult<size_t> MetalGraphicsContext::DownloadDisplayOutputTexture(void *buffer, size_t size) {
-    // TODO: if using hardware renderer, copy latest display output texture to buffer and return number of bytes copied.
-    // Return 0 if using software renderer.
-    return util::ErrorMessage{"Unimplemented"};
+    return m_impl->DownloadDisplayFrame(buffer, size);
+}
+
+std::shared_ptr<ymir::vdp::MetalDisplaySink> MetalGraphicsContext::GetDisplaySink() const {
+    return m_impl->displayFrames;
 }
 
 util::VoidResult<> MetalGraphicsContext::SetPresentMode(PresentMode mode) {
     m_impl->presentMode = mode;
+#if TARGET_OS_OSX
     if (m_impl->metalLayer != nil) {
         m_impl->metalLayer.displaySyncEnabled = (mode != PresentMode::NoSync);
     }
+#endif
     return {};
+}
+
+void MetalGraphicsContext::SetPostProcess(const PostProcessParams &params) {
+    m_impl->postProcess = params;
+}
+
+bool MetalGraphicsContext::SupportsUpscaling() const {
+    return m_impl->SupportsUpscaling();
+}
+
+void MetalGraphicsContext::SetFrameRateHint(double framesPerSecond) {
+    m_impl->frameRateHint = framesPerSecond;
+}
+
+double MetalGraphicsContext::GetDisplayRefreshRate() const {
+    return Impl::DisplayRefreshRate();
+}
+
+void MetalGraphicsContext::SetUpscaleMode(UpscaleMode mode) {
+    if (mode != UpscaleMode::Off && !m_impl->SupportsUpscaling()) {
+        mode = UpscaleMode::Off;
+    }
+    if (m_impl->upscaleMode != mode) {
+        m_impl->upscaleMode = mode;
+        m_impl->ReleaseUpscaler(); // the scaler is recreated on the next frame
+    }
 }
 
 util::ValueResult<PresentResult> MetalGraphicsContext::Present() {

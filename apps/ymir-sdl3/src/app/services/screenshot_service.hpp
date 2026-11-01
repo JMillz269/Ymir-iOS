@@ -34,6 +34,12 @@ public:
     /// @param[in] ss Screenshot data to queue.
     void Enqueue(screenshot::Screenshot &&ss);
 
+    /// @brief Writes the frame of a screenshot as a small JPEG thumbnail to its `thumbnailPath`, right away. Safe to
+    /// call from any thread.
+    /// @param[in] ss Frame to write.
+    /// @return `true` if the file was written
+    static bool WriteThumbnail(const screenshot::Screenshot &ss);
+
 private:
     std::thread m_thread;
     util::Event m_writeEvent;

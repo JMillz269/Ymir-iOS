@@ -144,6 +144,8 @@ struct Settings {
         bool rememberLastLoadedDisc;
 
         bool boostEmuThreadPriority;
+        // Measure every frame in detail and write it to the log (metal-vdp-log.txt on iOS); costs a little time
+        bool performanceLog;
         bool boostProcessPriority;
 
         int screenshotScale;
@@ -157,6 +159,9 @@ struct Settings {
         util::Observable<bool> useAltSpeed;
 
         bool pauseWhenUnfocused;
+        // Save a state of the game when it's left (the app is closed or sent to the background, the game is closed or
+        // another one started), into a slot of its own (iOS)
+        bool autoSaveState;
         bool unpauseOnDiscLoad;
         bool startPaused;
 
@@ -188,6 +193,10 @@ struct Settings {
         util::Observable<ymir::core::config::sys::VideoStandard> videoStandard;
 
         bool emulateSH2Cache;
+        util::Observable<bool> useSH2Recompiler;
+        bool jitRegisterCache; // recompiler options, for finding the cause of slowdowns
+        bool jitBlockLinking;
+        bool jitIdleDetection;
         util::Observable<uint32> sh2ClockFactor;
 
         std::filesystem::path internalBackupRAMImagePath;
@@ -466,6 +475,8 @@ struct Settings {
 
         bool forceIntegerScaling;
         bool forceAspectRatio;
+        bool forceStretch; // fill the whole display, ignoring the aspect ratio and integer scaling
+        float portraitStretchHeight; // 0..1: extra height on top of the uniformly scaled picture, up to the full screen height, in portrait
         Ratio forcedAspect;
         DisplayRotation rotation;
 
@@ -476,6 +487,19 @@ struct Settings {
         bool syncInFullscreenMode;
         bool useFullRefreshRateWithVideoSync;
         bool reduceLatency;
+        // How video sync paces frames: 0 = run at the Saturn's exact speed on a timer, 1 = lock to the display's refresh
+        // (one game frame per display frame; emulation and sound run that much faster, e.g. 0.3% for 59.83 Hz on 60 Hz)
+        int framePacing;
+        // 0 = off, 1 = automatic: start emulating each frame as late as the spare time allows, to cut input lag
+        int frameDelay;
+
+        int metalFXMode; // 0=off, 1=spatial, 2=temporal (see gfx::UpscaleMode); iOS only
+
+        // Picture filters (Metal backend)
+        float sharpness;
+        float scanlines;
+        float maskStrength;
+        bool sharpPixels;
 
         util::Observable<bool> fullScreen;
         bool doubleClickToFullScreen;
@@ -492,6 +516,9 @@ struct Settings {
         bool borderlessFullScreen;
 
         util::Observable<bool> useHardwareAcceleration;
+        util::Observable<bool> useMetalRenderer; // draw VDP2 on the GPU with Metal (VDP1 stays on the CPU)
+        util::Observable<bool> useMetalVDP1;     // with the Metal renderer: draw VDP1 on the GPU too
+        util::Observable<bool> useMetalDirectDisplay; // with the Metal renderer: display its images straight from the GPU
 
         struct SoftwareRenderer {
             util::Observable<bool> threadedVDP1;
@@ -502,6 +529,8 @@ struct Settings {
         struct Enhancements {
             util::Observable<bool> deinterlace;
             util::Observable<bool> transparentMeshes;
+            util::Observable<uint32> internalResolution; // 1 = native
+            util::Observable<bool> skipNativeVDP1;       // when upscaling, don't also draw VDP1 at native size
         } enhancements;
     } video;
 

@@ -86,6 +86,7 @@
 #include <ymir/media/host_cd.hpp>
 
 #include <ymir/util/lsn_denormals.hpp>
+#include <ymir/util/perf_counters.hpp>
 #include <ymir/util/process.hpp>
 #include <ymir/util/scope_guard.hpp>
 #include <ymir/util/string.hpp>
@@ -111,7 +112,15 @@
 
 #include <util/os_exception_handler.hpp>
 #include <util/os_features.hpp>
+#include <util/platform.hpp>
 #include <util/std_lib.hpp>
+
+#if YMIR_PLATFORM_IOS
+    #include <app/input/touch_controls.hpp>
+    #include <app/ios/host_interface.hpp>
+    #include <app/ios/ios_settings.hpp>
+    #include <util/ios_platform.hpp>
+#endif
 
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_events.h>
@@ -128,7 +137,10 @@
 
 #include <rtmidi/RtMidi.h>
 
+#include <algorithm>
+#include <cmath>
 #include <clocale>
+#include <ctime>
 #include <mutex>
 #include <numbers>
 #include <span>
@@ -337,6 +349,16 @@ int App::Run(const CommandLineOptions &options) {
             [&](bool value) { m_context.EnqueueEvent(events::emu::SetDeinterlace(value)); });
         videoSettings.enhancements.transparentMeshes.Observe(
             [&](bool value) { m_context.EnqueueEvent(events::emu::SetTransparentMeshes(value)); });
+        videoSettings.enhancements.internalResolution.Observe(
+            [&](uint32 value) { m_context.EnqueueEvent(events::emu::SetInternalResolution(value)); });
+        videoSettings.enhancements.skipNativeVDP1.Observe(
+            [&](bool value) { m_context.EnqueueEvent(events::emu::SetSkipNativeVDP1(value)); });
+        videoSettings.useMetalRenderer.Observe(
+            [&](bool value) { m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false)); });
+        videoSettings.useMetalVDP1.Observe(
+            [&](bool value) { m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false)); });
+        videoSettings.useMetalDirectDisplay.Observe(
+            [&](bool value) { m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false)); });
     }
 
     // Profile priority:
@@ -355,6 +377,12 @@ int App::Run(const CommandLineOptions &options) {
         m_context.profile.UseUserProfilePath();
     } else {
         bool hasSettingsFile = false;
+
+#if YMIR_PLATFORM_IOS
+        // iOS only has one place to store data, the app's Documents directory (visible in the Files app)
+        m_context.profile.UseUserProfilePath();
+        hasSettingsFile = true; // skips all checks below
+#endif
 
 #ifdef __linux__
         // Force "installed" mode under Flatpak
@@ -439,6 +467,12 @@ int App::Run(const CommandLineOptions &options) {
     if (auto result = settings.Load(m_context.profile.GetPath(ProfilePath::Root) / kSettingsFile); !result) {
         devlog::warn<grp::base>("Failed to load settings: {}", result.string());
     }
+#if YMIR_PLATFORM_IOS
+    // iOS apps are always full screen; this also makes the main menu bar auto-hide so it doesn't cover the game
+    settings.video.fullScreen = true;
+    // There is no Metal implementation of the GPU (hardware) VDP renderer; it would only show a blank screen
+    settings.video.useHardwareAcceleration = false;
+#endif
     util::ScopeGuard sgSaveSettings{[&] {
         if (auto result = settings.Save(); !result) {
             devlog::warn<grp::base>("Failed to save settings: {}", result.string());
@@ -461,7 +495,7 @@ int App::Run(const CommandLineOptions &options) {
     m_context.EnqueueEvent(events::emu::LoadInternalBackupMemory());
     EnableRewindBuffer(settings.general.enableRewindBuffer);
     util::BoostCurrentProcessPriority(settings.general.boostProcessPriority);
-    if (settings.video.useHardwareAcceleration) {
+    if (settings.video.useHardwareAcceleration || settings.video.useMetalRenderer) {
         m_context.EnqueueEvent(events::emu::SwitchVDPRenderer(false));
     }
 
@@ -477,7 +511,8 @@ int App::Run(const CommandLineOptions &options) {
     if (!options.gameDiscPath.empty()) {
         // This also inserts the game-specific cartridges or the one configured by the user in Settings > Cartridge
         m_discService.LoadDiscImage(options.gameDiscPath, false);
-    } else if (settings.general.rememberLastLoadedDisc && !m_context.state.recentDiscs.empty()) {
+    } else if (!YMIR_PLATFORM_IOS && settings.general.rememberLastLoadedDisc && !m_context.state.recentDiscs.empty()) {
+        // (on iOS the user picks a game from the native game library instead)
         m_discService.LoadDiscImage(m_context.state.recentDiscs[0], false);
     } else {
         m_context.EnqueueEvent(events::emu::InsertCartridgeFromSettings());
@@ -503,7 +538,10 @@ int App::Run(const CommandLineOptions &options) {
     if (!iplLoadResult.succeeded) {
         if (m_context.romManager.GetIPLROMs().empty()) {
             // Could not load IPL ROM because there are none -- likely to be a fresh install, so show the Welcome screen
-            m_windowManagerService.OpenWelcomeModal(true);
+            // (on iOS the native game library explains how to import a BIOS instead)
+            if constexpr (!YMIR_PLATFORM_IOS) {
+                m_windowManagerService.OpenWelcomeModal(true);
+            }
         } else {
             m_windowManagerService.OpenSimpleErrorModal(
                 fmt::format("Could not load IPL ROM: {}", iplLoadResult.errorMessage));
@@ -529,6 +567,29 @@ int App::Run(const CommandLineOptions &options) {
     RunEmulator();
 
     return 0;
+}
+
+void App::UpdateFrameDelay(double spareMs) {
+    auto &screen = m_context.screen;
+    if (m_settings.video.frameDelay == 0 || m_context.paused || m_context.emuSpeed.GetCurrentSpeedFactor() != 1.0) {
+        screen.frameDelayMs.store(0.0, std::memory_order_relaxed);
+        return;
+    }
+    // Keep about this much of the frame spare: the GPU still has to finish the picture after the emulator is done with
+    // it, and some frames take longer to emulate than others
+    static constexpr double kTargetSpareMs = 6.0;
+    static constexpr double kMaxDelayMs = 12.0;
+    double delay = screen.frameDelayMs.load(std::memory_order_relaxed);
+    if (spareMs < 1.0) {
+        // The display nearly had to wait for this frame: back off a lot
+        delay -= 4.0;
+    } else if (spareMs < kTargetSpareMs) {
+        delay -= (kTargetSpareMs - spareMs) * 0.5;
+    } else {
+        // Creep up slowly (3 ms a second at most), so that a run of light frames doesn't leave no room for a heavy one
+        delay += std::min(0.05, (spareMs - kTargetSpareMs) * 0.1);
+    }
+    screen.frameDelayMs.store(std::clamp(delay, 0.0, kMaxDelayMs), std::memory_order_relaxed);
 }
 
 void App::RunEmulator() {
@@ -891,8 +952,8 @@ void App::RunEmulator() {
     // Software framebuffer texture
     auto swFbTextureResult = m_graphicsService.CreateTexture(
         {
-            .width = vdp::kMaxResH,
-            .height = vdp::kMaxResV,
+            .width = std::max<uint32>(vdp::kMaxResH, 352 * SharedContext::Screen::kMaxInternalScale),
+            .height = std::max<uint32>(vdp::kMaxResV, 256 * SharedContext::Screen::kMaxInternalScale),
             .format = gfx::PixelFormat::R8G8B8X8_UNORM,
             .access = gfx::TextureAccess::Streaming,
             .filterMode = gfx::TextureFilterMode::Nearest,
@@ -940,7 +1001,10 @@ void App::RunEmulator() {
         const double dispScaleX = (double)targetWidth / dispWidth;
         const double dispScaleY = (double)targetHeight / dispHeight;
         const double dispScale = std::min(dispScaleX, dispScaleY);
-        const uint32 scale = std::max(1.0, ceil(dispScale));
+        // Frames rendered at a higher internal resolution are scaled into the display texture by a whole number of
+        // times their own size
+        const uint32 texScale = screen.texScale;
+        const uint32 scale = std::max(1.0, ceil(dispScale / texScale)) * texScale;
 
         assert(m_graphicsService.IsTextureHandleValid(dispTexture));
         assert(m_graphicsService.IsTextureHandleValid(swFbTexture));
@@ -961,22 +1025,38 @@ void App::RunEmulator() {
                            .w = (float)screen.width * screen.fbScale,
                            .h = (float)screen.height * screen.fbScale};
 
-        if (videoSettings.useHardwareAcceleration) {
+        if (videoSettings.useHardwareAcceleration || screen.directDisplay) {
             gfx::IGraphicsContext &gfxCtx = m_graphicsService.GetGraphicsContext();
             const std::optional<gfx::DisplayTextureSpec> hwFbTexture = gfxCtx.AcquireCurrentDisplayOutputTexture();
             if (hwFbTexture) {
                 screen.SetResolution(hwFbTexture->width, hwFbTexture->height);
 
+                // (the image may be at a higher internal resolution: the display texture was sized for its scale)
                 const gfx::TextureID dispTextureID = m_graphicsService.GetTextureID(dispTexture);
-                gfx::FRect srcRect{.x = 0.0f, .y = 0.0f, .w = (float)screen.width, .h = (float)screen.height};
+                gfx::FRect srcRect{.x = 0.0f,
+                                   .y = 0.0f,
+                                   .w = (float)screen.width * hwFbTexture->scale,
+                                   .h = (float)screen.height * hwFbTexture->scale};
                 gfxCtx.RenderToTexture(hwFbTexture->id, dispTextureID, srcRect, dstRect);
                 gfxCtx.ReleaseCurrentDisplayOutputTexture();
             }
         } else {
-            gfx::FRect srcRect{.x = 0.0f, .y = 0.0f, .w = (float)screen.width, .h = (float)screen.height};
+            gfx::FRect srcRect{.x = 0.0f,
+                               .y = 0.0f,
+                               .w = (float)screen.width * texScale,
+                               .h = (float)screen.height * texScale};
             m_graphicsService.RenderToTexture(swFbTexture, dispTexture, srcRect, dstRect);
         }
     };
+
+#if YMIR_PLATFORM_IOS
+    // Artwork of the on-screen controller; kept alive for the whole run in case the texture has to be recreated
+    gfx::GUITextureHandle touchAtlasTexture = gfx::kInvalidGUITextureHandle;
+    stbi_uc *touchAtlasPixels = nullptr;
+    int touchAtlasWidth = 0;
+    int touchAtlasHeight = 0;
+    ScopeGuard sgFreeTouchAtlas{[&] { stbi_image_free(touchAtlasPixels); }};
+#endif
 
     // Logo texture
     stbi_uc *ymirLogoImgData;
@@ -1023,6 +1103,38 @@ void App::RunEmulator() {
         m_context.images.ymirLogo.size.y = imgH;
         sgFreeImageData.Cancel();
     }
+
+#if YMIR_PLATFORM_IOS
+    {
+        cmrc::file atlasFile = embedfs.open("images/touch_controls.png");
+        int chans = 0;
+        touchAtlasPixels = stbi_load_from_memory((const stbi_uc *)atlasFile.begin(), atlasFile.size(),
+                                                 &touchAtlasWidth, &touchAtlasHeight, &chans, 4);
+        if (touchAtlasPixels != nullptr) {
+            auto atlasResult = m_graphicsService.CreateTexture(
+                {
+                    .width = static_cast<uint32>(touchAtlasWidth),
+                    .height = static_cast<uint32>(touchAtlasHeight),
+                    .format = gfx::PixelFormat::R8G8B8A8_UNORM,
+                    .access = gfx::TextureAccess::Static,
+                    .name = "[Ymir] On-screen controls",
+                },
+                [&](gfx::GUITextureHandle, bool, void *data, size_t pitch) {
+                    auto byteData = static_cast<char *>(data);
+                    for (int y = 0; y < touchAtlasHeight; ++y) {
+                        memcpy(byteData + y * pitch, touchAtlasPixels + (size_t)y * touchAtlasWidth * sizeof(uint32),
+                               touchAtlasWidth * sizeof(uint32));
+                    }
+                });
+            if (atlasResult) {
+                touchAtlasTexture = atlasResult.Value();
+            } else {
+                devlog::warn<grp::base>("Failed to create the on-screen controls texture: {}",
+                                        atlasResult.Error().message);
+            }
+        }
+    }
+#endif
     ScopeGuard sgFreeImageData{[&] { stbi_image_free(ymirLogoImgData); }};
 
     // ---------------------------------
@@ -1088,7 +1200,7 @@ void App::RunEmulator() {
 
         vdp.SetSoftwareRenderCallback({
             this,
-            [](uint32 *fb, uint32 width, uint32 height, void *ctx) {
+            [](uint32 *fb, uint32 width, uint32 height, uint32 fbScale, void *ctx) {
                 auto &app = *static_cast<App *>(ctx);
                 auto &sharedCtx = app.m_context;
                 auto &screen = sharedCtx.screen;
@@ -1098,12 +1210,22 @@ void App::RunEmulator() {
                 }
 
                 if (sharedCtx.emuSpeed.limitSpeed && screen.videoSync) {
+                    const auto perfWaitStart = ymir::perf::Clock::now();
                     screen.frameRequestEvent.Wait();
+                    const uint64 waitNs = ymir::perf::NanosecondsSince(perfWaitStart);
+                    ymir::perf::emuWaitNs.fetch_add(waitNs, std::memory_order_relaxed);
                     screen.frameRequestEvent.Reset();
+                    app.UpdateFrameDelay(waitNs / 1.0e6);
                 }
                 if (settings.video.reduceLatency || !screen.updated || screen.videoSync) {
                     std::unique_lock lock{screen.mtxFramebuffer};
-                    std::copy_n(fb, width * height, screen.framebuffers[screen.currBackFramebuffer].data());
+                    // (no pixels: the renderer handed the image to the graphics context on the GPU)
+                    screen.directDisplay = fb == nullptr;
+                    if (fb != nullptr) {
+                        std::copy_n(fb, size_t(width) * fbScale * height * fbScale,
+                                    screen.framebuffers[screen.currBackFramebuffer].data());
+                    }
+                    screen.framebufferScales[screen.currBackFramebuffer] = fbScale;
                     screen.updated = true;
                     if (screen.videoSync) {
                         screen.frameReadyEvent.Set();
@@ -1208,7 +1330,8 @@ void App::RunEmulator() {
 
     auto &inputContext = m_context.inputContext;
 
-    m_context.paused = m_options.startPaused || settings.general.startPaused;
+    // On iOS nothing runs until the user picks a game in the native game library
+    m_context.paused = m_options.startPaused || settings.general.startPaused || YMIR_PLATFORM_IOS;
     bool pausedByLostFocus = false;
 
     if (m_options.enableDebugTracing) {
@@ -1362,7 +1485,192 @@ void App::RunEmulator() {
     std::unordered_map<SDL_JoystickID, SDL_Gamepad *> gamepads{};
     PlayerIndexMap gamepadPlayerIndices;
 
+    // Captures the frame on the display (hardware renderers read it back from the GPU). Used by screenshots and by the
+    // thumbnails of save states.
+    auto captureScreenshot = [&](screenshot::Screenshot &ss) {
+        bool downloaded = true;
+        ss.fbWidth = screen.width;
+        ss.fbHeight = screen.height;
+        if (vdp.GetRenderer().IsHardwareRenderer()) {
+            // Hardware renderers always copy the full resolution texture
+            ss.fb.resize(vdp::kMaxResH * vdp::kMaxResV);
+            const size_t framebufferSize = vdp::kMaxResH * vdp::kMaxResV * sizeof(uint32);
+            gfx::IGraphicsContext &gfxCtx = m_graphicsService.GetGraphicsContext();
+            auto result = gfxCtx.DownloadDisplayOutputTexture(ss.fb.data(), framebufferSize);
+            if (result) {
+                const size_t copySize = result.Value();
+                if (copySize < framebufferSize) {
+                    devlog::warn<grp::base>(
+                        "Display framebuffer not fully downloaded. Expected {} bytes, got {} bytes",
+                        framebufferSize, copySize);
+                }
+            } else {
+                downloaded = false;
+                m_context.DisplayMessage(
+                    fmt::format("Display framebuffer could not be downloaded: {}", result.Error().message));
+            }
+
+            // Shrink it down to size in-place
+            for (uint32 y = 1; y < screen.height; ++y) {
+                const size_t srcPos = y * vdp::kMaxResH;
+                const size_t dstPos = y * screen.width;
+                std::copy_n(&ss.fb[srcPos], screen.width, &ss.fb[dstPos]);
+            }
+            ss.fb.resize(screen.width * screen.height);
+        } else if (screen.directDisplay) {
+            // The renderer handed the frame to the graphics context on the GPU; read it back from there
+            const uint32 fbScale = screen.DisplayFramebufferScale();
+            ss.fbWidth = screen.width * fbScale;
+            ss.fbHeight = screen.height * fbScale;
+            ss.fb.resize(size_t(ss.fbWidth) * ss.fbHeight);
+            gfx::IGraphicsContext &gfxCtx = m_graphicsService.GetGraphicsContext();
+            auto result = gfxCtx.DownloadDisplayOutputTexture(ss.fb.data(), ss.fb.size() * sizeof(uint32));
+            if (!result) {
+                downloaded = false;
+                m_context.DisplayMessage(
+                    fmt::format("Display framebuffer could not be downloaded: {}", result.Error().message));
+            }
+        } else {
+            // The software renderer already outputs the frame in a compact vector
+            const uint32 fbScale = screen.DisplayFramebufferScale();
+            ss.fbWidth = screen.width * fbScale;
+            ss.fbHeight = screen.height * fbScale;
+            ss.fb.resize(size_t(ss.fbWidth) * ss.fbHeight);
+            const auto &fb = screen.framebuffers[screen.currBackFramebuffer ^ 1u];
+            std::copy_n(fb.begin(), ss.fb.size(), ss.fb.begin());
+        }
+        ss.fbScaleX = screen.scaleX;
+        ss.fbScaleY = screen.scaleY;
+        return downloaded && !ss.fb.empty();
+    };
+
+    // Writes the thumbnail of a slot of the game that is loaded: a small picture of the frame on the display
+    auto saveThumbnail = [&](std::size_t slotIndex) {
+        const std::filesystem::path path = m_saveStateService.ThumbnailPath(slotIndex);
+        if (path.empty() || m_context.state.loadedDiscImagePath.empty()) {
+            return;
+        }
+        screenshot::Screenshot ss{};
+        if (captureScreenshot(ss)) {
+            ss.thumbnailPath = path;
+            services::ScreenshotService::WriteThumbnail(ss);
+        }
+    };
+
+    // Writes a state that was just saved to its file, with its thumbnail
+    auto persistSavedState = [&](uint32 slotIndex) {
+        m_saveStateService.PersistSaveState(slotIndex);
+        saveThumbnail(slotIndex);
+    };
+
+#if YMIR_PLATFORM_IOS
+    // On-screen control pad, driven by touch events. Hidden while a hardware gamepad is connected.
+    input::TouchControls touchControls{m_context.inputContext};
+    SDL_DisableScreenSaver();
+
+    // Expose the emulator to the native iOS user interface (game library, settings and in-game menu)
+    auto &iosHost = app::ios::GetHost();
+    iosHost.isPaused = [this] { return m_context.paused; };
+    iosHost.isFastForward = [this] { return !m_context.emuSpeed.limitSpeed; };
+    iosHost.isDiscLoaded = [this] { return !m_context.state.loadedDiscImagePath.empty(); };
+    iosHost.loadedDiscPath = [this] { return m_context.state.loadedDiscImagePath; };
+    iosHost.hasIPLROM = [this] { return !m_context.iplRomPath.empty(); };
+    iosHost.iplName = [this]() -> std::string {
+        if (m_context.iplRomInfo != nullptr && m_context.iplRomInfo->version != nullptr) {
+            return fmt::format("{} ({})", m_context.iplRomInfo->version, m_context.iplRomPath.filename().string());
+        }
+        return m_context.iplRomPath.filename().string();
+    };
+    iosHost.saveSlots = [this] {
+        std::vector<app::ios::SaveSlotInfo> slots;
+        for (const auto &meta : m_saveStateService.List()) {
+            app::ios::SaveSlotInfo info{};
+            info.index = static_cast<int>(meta.index);
+            info.present = meta.present;
+            if (meta.present) {
+                std::tm localTime = util::to_local_time(meta.ts);
+                char buf[64]{};
+                std::strftime(buf, sizeof(buf), "%b %d, %H:%M", &localTime);
+                info.description = buf;
+            }
+            slots.push_back(std::move(info));
+        }
+        return slots;
+    };
+    iosHost.launchGame = [this](const std::filesystem::path &path) {
+        m_context.EnqueueEvent(events::emu::LoadDisc(path));
+        m_context.EnqueueEvent(events::emu::SetPaused(false));
+        m_context.emuSpeed.limitSpeed = true;
+        m_context.audioSystem.SetSync(m_context.emuSpeed.ShouldSyncToAudio());
+    };
+    iosHost.launchGameAndLoadState = [this](const std::filesystem::path &path, int slot) {
+        // (the events run in this order on the emulator thread: loading the disc reads the save states of the game,
+        // which the state is then taken from)
+        m_context.EnqueueEvent(events::emu::LoadDisc(path));
+        m_context.EnqueueEvent(events::emu::SetPaused(false));
+        m_context.emuSpeed.limitSpeed = true;
+        m_context.audioSystem.SetSync(m_context.emuSpeed.ShouldSyncToAudio());
+        m_saveStateService.LoadSaveStateSlot(static_cast<std::size_t>(slot));
+    };
+    iosHost.autoSave = [this, saveThumbnail, &screen](std::function<void()> done) {
+        if (!m_settings.general.autoSaveState || m_context.state.loadedDiscImagePath.empty()) {
+            if (done) {
+                done();
+            }
+            return;
+        }
+        // (the picture is taken here, where the frame is on the display; the state itself on the emulator thread)
+        saveThumbnail(services::SaveStateService::kAutoSlot);
+        m_context.EnqueueEvent(events::emu::AutoSaveState(std::move(done)));
+        // The emulator thread may be waiting for the GUI thread to hand it the next frame, which won't come if the app
+        // is on its way to the background: let it go on to the event
+        screen.frameRequestEvent.Set();
+        m_emuProcessEvent.Set();
+    };
+    iosHost.setPaused = [this](bool paused) { m_context.EnqueueEvent(events::emu::SetPaused(paused)); };
+    iosHost.setFastForward = [this](bool enable) {
+        m_context.emuSpeed.limitSpeed = !enable;
+        m_context.audioSystem.SetSync(m_context.emuSpeed.ShouldSyncToAudio());
+    };
+    iosHost.softReset = [this] { m_context.EnqueueEvent(events::emu::SoftReset()); };
+    iosHost.hardReset = [this] { m_context.EnqueueEvent(events::emu::HardReset()); };
+    iosHost.openCloseTray = [this] { m_context.EnqueueEvent(events::emu::OpenCloseTray()); };
+    iosHost.ejectDisc = [this] { m_context.EnqueueEvent(events::emu::EjectDisc()); };
+    iosHost.saveState = [this](int slot) { m_saveStateService.SaveSaveStateSlot(static_cast<std::size_t>(slot)); };
+    iosHost.loadState = [this](int slot) { m_saveStateService.LoadSaveStateSlot(static_cast<std::size_t>(slot)); };
+    iosHost.deleteState = [this](int slot) { m_saveStateService.DeleteSaveStateSlot(static_cast<std::size_t>(slot)); };
+    iosHost.saveStatePath = [this](int slot) {
+        return m_saveStateService.SaveStateSlotPath(static_cast<std::size_t>(slot));
+    };
+    iosHost.takeScreenshot = [this] { m_context.EnqueueEvent(events::gui::TakeScreenshot()); };
+    iosHost.reloadIPLROM = [this]() -> std::string {
+        m_romService.ScanIPLROMs();
+        const util::ROMLoadResult result = m_romService.LoadIPLROM();
+        if (!result.succeeded) {
+            return result.errorMessage.empty() ? std::string{"No valid IPL ROM found"} : std::string{result.errorMessage};
+        }
+        m_context.EnqueueEvent(events::emu::HardReset());
+        return {};
+    };
+    touchControls.SetStoragePath(m_context.profile.GetPath(ProfilePath::PersistentState) / "touch_layout.cfg");
+    app::ios::InstallSettingsAccessors(iosHost, m_context, settings, {.touchControls = &touchControls});
+    iosHost.quitGame = [this] {
+        // Leaves the emulator idle (and silent) on the BIOS until another game is launched
+        m_context.EnqueueEvent(events::emu::SetPaused(true));
+        m_context.EnqueueEvent(events::emu::EjectDisc());
+        m_context.EnqueueEvent(events::emu::HardReset());
+        m_context.state.loadedDiscImagePath.clear();
+    };
+    app::ios::ApplyVideoFilters(m_graphicsService.GetGraphicsContext(), settings);
+    util::ScopeGuard sgClearIOSHost{[&] { app::ios::GetHost() = {}; }};
+
+    // The native UI is presented on top of the emulator view once the first frames have been drawn
+    int iosLauncherDelayFrames = 10;
+#endif
+
     std::array<GUIEvent, 64> evts{};
+    // GUI events that came in while a native screen covered the emulator, to be handled once it's back (iOS)
+    std::vector<GUIEvent> deferredGUIEvents;
 
 #if Ymir_ENABLE_IMGUI_DEMO
     bool showImGuiDemoWindow = false;
@@ -1370,6 +1678,7 @@ void App::RunEmulator() {
 
     screen.nextFrameTarget = clk::now();
     double avgFrameDelay = 0.0;
+    double avgAudioBufferPct = 0.5; // for display paced frames: smoothed audio buffer level
 
     bool imguiWantedKeyboardInput = false;
     bool imguiWantedMouseInput = false;
@@ -1381,12 +1690,18 @@ void App::RunEmulator() {
         bool forceScreenScale = false;
         int forcedScreenScale = 1;
 
+        // (the renderer and the display measure frames in detail only while the performance log is on)
+        ymir::perf::detailedLog.store(settings.general.performanceLog, std::memory_order_relaxed);
+
         // Configure video sync
         const bool fullScreen = settings.video.fullScreen;
         const bool videoSync =
             //! vdp.GetRenderer().IsHardwareRenderer() && // TODO: fix video sync with hardware renderers
             (fullScreen ? settings.video.syncInFullscreenMode : settings.video.syncInWindowedMode);
         screen.videoSync = videoSync && !m_context.paused && m_context.emuSpeed.limitSpeed;
+        if (!screen.videoSync) {
+            m_graphicsService.SetFrameRateHint(0.0); // paused, fast-forwarding or no video sync: no restriction
+        }
 
         const double frameIntervalAdjustFactor = 0.2; // how much adjustment is applied to the frame interval
 
@@ -1439,8 +1754,40 @@ void App::RunEmulator() {
                 maxFrameRate = std::max(maxFrameRate, 48.0);
             }
 
+            // Frame pacing by the display: show one game frame on every display frame (or every two at 120 Hz),
+            // timed at the display's rate instead of the Saturn's own rate. Emulation and sound then run that much faster or slower (0.3%
+            // for 59.83 Hz shown at 60 Hz), and no frame is ever shown twice or skipped because the two rates drift
+            // apart. Only for rates close enough to the display's.
+            bool displayPaced = false;
+            double displayFrameRate = 0.0;
+            if (screen.videoSync && settings.video.framePacing == 1 &&
+                m_context.emuSpeed.GetCurrentSpeedFactor() == 1.0) {
+                const double refresh = m_graphicsService.GetDisplayRefreshRate();
+                if (refresh > 0.0) {
+                    const double ticks = std::max(1.0, std::round(refresh / baseFrameRate));
+                    displayFrameRate = refresh / ticks;
+                    const double ratio = displayFrameRate / baseFrameRate;
+                    displayPaced = ratio > 0.97 && ratio < 1.03;
+                }
+            }
+            if (displayPaced) {
+                // Play the sound at the same speed up, nudged by how full the sound buffer is so that it stays half full
+                const double audioBufferPct = (double)m_context.audioSystem.GetBufferCount() /
+                                              std::max<uint32>(1u, m_context.audioSystem.GetBufferCapacity());
+                avgAudioBufferPct += (audioBufferPct - avgAudioBufferPct) * 0.05;
+                const double correction = std::clamp((avgAudioBufferPct - 0.5) * 0.02, -0.005, 0.005);
+                m_context.audioSystem.SetSpeedRatio(displayFrameRate / baseFrameRate * (1.0 + correction));
+            } else {
+                avgAudioBufferPct = 0.5;
+                m_context.audioSystem.SetSpeedRatio(1.0);
+            }
+
             // Compute GUI frame duplication
-            if (baseFrameRate <= maxFrameRate) {
+            if (displayPaced) {
+                screen.dupGUIFrames = 1;
+                baseFrameInterval = std::chrono::duration_cast<decltype(baseFrameInterval)>(
+                    std::chrono::duration<double>(1.0 / displayFrameRate));
+            } else if (baseFrameRate <= maxFrameRate) {
                 // Duplicate frames displayed by the GUI to maintain the minimum requested GUI frame rate
                 screen.dupGUIFrames = std::max(1.0, std::floor(maxFrameRate / baseFrameRate));
                 baseFrameInterval /= screen.dupGUIFrames;
@@ -1448,6 +1795,11 @@ void App::RunEmulator() {
                 // Base frame rate is higher than refresh rate; don't duplicate any frames
                 screen.dupGUIFrames = 1;
             }
+
+            // Tell the display how often frames are going to be presented, so that a variable refresh rate display
+            // doesn't run faster than needed
+            m_graphicsService.SetFrameRateHint(
+                screen.videoSync ? (displayPaced ? displayFrameRate : baseFrameRate * screen.dupGUIFrames) : 0.0);
 
             // Update VSync setting
             gfx::PresentMode newPresentMode;
@@ -1477,6 +1829,9 @@ void App::RunEmulator() {
                     frameInterval * avgFrameDelay * frameIntervalAdjustFactor);
             }
 
+            // (with display pacing too: waiting for frames to reach the screen instead let a ProMotion display lower
+            // its refresh rate, which slowed frames down further, down to 13-19 fps; the timer runs at the display's
+            // rate instead, which the frame duration rounding keeps in step with the refreshes)
             if (screen.videoSync) {
                 // Sleep until 1ms before the next frame presentation time, then spin wait for the deadline
                 bool skipDelay = false;
@@ -1508,11 +1863,13 @@ void App::RunEmulator() {
                 }
             }
             if (++screen.dupGUIFrameCounter >= screen.dupGUIFrames) {
+                screen.frameRequestTime.store(clk::now().time_since_epoch().count(), std::memory_order_relaxed);
                 screen.frameRequestEvent.Set();
                 screen.dupGUIFrameCounter = 0;
                 screen.expectFrame = true;
             }
         } else {
+            m_context.audioSystem.SetSpeedRatio(1.0);
             screen.frameRequestEvent.Set();
         }
 
@@ -1629,6 +1986,9 @@ void App::RunEmulator() {
                     const int playerIndex = gamepadPlayerIndices.AssignPlayerIndex(evt.gdevice.which);
                     gamepads[evt.gdevice.which] = gamepad;
                     inputContext.ConnectGamepad(playerIndex);
+#if YMIR_PLATFORM_IOS
+                    touchControls.SetHardwareGamepadPresent(true);
+#endif
                     devlog::debug<grp::base>("Gamepad {} added -> player index {}", evt.gdevice.which, playerIndex);
                 }
                 break;
@@ -1640,6 +2000,9 @@ void App::RunEmulator() {
                     SDL_CloseGamepad(gamepads.at(evt.gdevice.which));
                     inputContext.DisconnectGamepad(playerIndex);
                     gamepads.erase(evt.gdevice.which);
+#if YMIR_PLATFORM_IOS
+                    touchControls.SetHardwareGamepadPresent(!gamepads.empty());
+#endif
                     devlog::debug<grp::base>("Gamepad {} removed -> player index {}", evt.gdevice.which, playerIndex);
                 } else {
                     devlog::warn<grp::base>("Gamepad {} removed, but it was not open!", evt.gdevice.which);
@@ -1664,6 +2027,15 @@ void App::RunEmulator() {
             case SDL_EVENT_GAMEPAD_BUTTON_DOWN: [[fallthrough]];
             case SDL_EVENT_GAMEPAD_BUTTON_UP: //
             {
+#if YMIR_PLATFORM_IOS
+                // The Select/Back button opens the native in-game menu instead of reaching the game
+                if (evt.gbutton.button == SDL_GAMEPAD_BUTTON_BACK) {
+                    if (evt.gbutton.down) {
+                        util::ios::ToggleGameMenu();
+                    }
+                    break;
+                }
+#endif
                 const int playerIndex = gamepadPlayerIndices.GetPlayerIndex(evt.gbutton.which);
                 inputContext.ProcessPrimitive(
                     playerIndex, input::SDL3ToGamepadButton((SDL_GamepadButton)evt.gbutton.button), evt.gbutton.down);
@@ -1688,6 +2060,15 @@ void App::RunEmulator() {
                 // evt.gsensor.sensor;
                 // evt.gsensor.data;
                 break;
+
+#if YMIR_PLATFORM_IOS
+            case SDL_EVENT_FINGER_DOWN: [[fallthrough]];
+            case SDL_EVENT_FINGER_MOTION: [[fallthrough]];
+            case SDL_EVENT_FINGER_UP: [[fallthrough]];
+            case SDL_EVENT_FINGER_CANCELED: //
+                touchControls.ProcessFingerEvent(evt, io.DisplaySize, io.WantCaptureMouse);
+                break;
+#endif
 
             case SDL_EVENT_QUIT: goto end_loop; break;
 
@@ -1735,6 +2116,9 @@ void App::RunEmulator() {
                     }
                 }
                 m_mouseCaptureService.ReleaseAllMice();
+#if YMIR_PLATFORM_IOS
+                touchControls.CancelTouches();
+#endif
                 break;
 
             case SDL_EVENT_DROP_FILE: //
@@ -1751,14 +2135,62 @@ void App::RunEmulator() {
             m_displayService.RescaleUI();
         }
 
+#if YMIR_PLATFORM_IOS
+        touchControls.Update(screen.window, io.DisplaySize);
+
+        // The on-screen Menu button opens the native in-game menu
+        if (touchControls.IsMenuRequested()) {
+            touchControls.ClearMenuRequest();
+            util::ios::ShowGameMenu();
+        }
+
+        // Present the native game library over the emulator view on startup
+        if (iosLauncherDelayFrames > 0 && --iosLauncherDelayFrames == 0) {
+            util::ios::AttachGameWindow(screen.window);
+            util::ios::ShowLauncher();
+        }
+#endif
+
+#if YMIR_PLATFORM_IOS
+        // A native screen covers the emulator (which is paused): skip rendering and let UIKit have the main thread so
+        // that scrolling and animations stay smooth
+        if (util::ios::IsNativeUIVisible()) {
+            // The native screen gets the touches now, so the fingers on the controls are as good as lifted
+            touchControls.CancelTouches();
+            // The emulator thread may be waiting for the GUI thread to hand it the next frame. Release it, otherwise it
+            // never gets to process the pause event and the audio keeps repeating the last buffer.
+            screen.frameRequestEvent.Set();
+            m_emuProcessEvent.Set();
+
+            // A state saved from the game menu is written to its file right away, so that it's kept even if the app
+            // is closed before going back to the game. The other events wait until the emulator is shown again.
+            {
+                const size_t count = m_context.eventQueues.gui.try_dequeue_bulk(evts.begin(), evts.size());
+                for (size_t i = 0; i < count; i++) {
+                    if (evts[i].type == GUIEvent::Type::StateSaved) {
+                        persistSavedState(std::get<uint32>(evts[i].value));
+                    } else {
+                        deferredGUIEvents.push_back(evts[i]);
+                    }
+                }
+            }
+
+            util::ios::PumpNativeUI(1.0 / 120.0);
+            continue;
+        }
+#endif
+
         // Process all axis changes
         m_context.inputContext.ProcessAxes();
 
         // Make emulator thread process next frame
         m_emuProcessEvent.Set();
 
-        // Process GUI events
-        const size_t evtCount = m_context.eventQueues.gui.try_dequeue_bulk(evts.begin(), evts.size());
+        // Process GUI events (those put aside while a native screen was shown first)
+        size_t evtCount = std::min(deferredGUIEvents.size(), evts.size());
+        std::copy_n(deferredGUIEvents.begin(), evtCount, evts.begin());
+        deferredGUIEvents.erase(deferredGUIEvents.begin(), deferredGUIEvents.begin() + evtCount);
+        evtCount += m_context.eventQueues.gui.try_dequeue_bulk(evts.begin() + evtCount, evts.size() - evtCount);
         for (size_t i = 0; i < evtCount; i++) {
             const GUIEvent &evt = evts[i];
             using EvtType = GUIEvent::Type;
@@ -1959,39 +2391,7 @@ void App::RunEmulator() {
             case EvtType::TakeScreenshot: //
             {
                 screenshot::Screenshot ss{};
-                ss.fbWidth = screen.width;
-                ss.fbHeight = screen.height;
-                if (vdp.GetRenderer().IsHardwareRenderer()) {
-                    // Hardware renderers always copy the full resolution texture
-                    ss.fb.resize(vdp::kMaxResH * vdp::kMaxResV);
-                    const size_t framebufferSize = vdp::kMaxResH * vdp::kMaxResV * sizeof(uint32);
-                    gfx::IGraphicsContext &gfxCtx = m_graphicsService.GetGraphicsContext();
-                    auto result = gfxCtx.DownloadDisplayOutputTexture(ss.fb.data(), framebufferSize);
-                    if (result) {
-                        const size_t copySize = result.Value();
-                        if (copySize < framebufferSize) {
-                            devlog::warn<grp::base>(
-                                "Display framebuffer not fully downloaded. Expected {} bytes, got {} bytes",
-                                framebufferSize, copySize);
-                        }
-                    } else {
-                        m_context.DisplayMessage(
-                            fmt::format("Display framebuffer could not be downloaded: {}", result.Error().message));
-                    }
-
-                    // Shrink it down to size in-place
-                    for (uint32 y = 1; y < screen.height; ++y) {
-                        const size_t srcPos = y * vdp::kMaxResH;
-                        const size_t dstPos = y * screen.width;
-                        std::copy_n(&ss.fb[srcPos], screen.width, &ss.fb[dstPos]);
-                    }
-                    ss.fb.resize(screen.width * screen.height);
-                } else {
-                    // The software renderer already outputs the frame in a compact vector
-                    ss.fb.resize(screen.width * screen.height);
-                    const auto &fb = screen.framebuffers[screen.currBackFramebuffer ^ 1u];
-                    std::copy_n(fb.begin(), ss.fb.size(), ss.fb.begin());
-                }
+                captureScreenshot(ss);
                 ss.fbScaleX = screen.scaleX;
                 ss.fbScaleY = screen.scaleY;
                 ss.ssScale = settings.general.screenshotScale;
@@ -2006,13 +2406,15 @@ void App::RunEmulator() {
             case EvtType::StateLoaded:
                 m_context.DisplayMessage(fmt::format("State {} loaded", std::get<uint32>(evt.value) + 1));
                 break;
-            case EvtType::StateSaved: m_saveStateService.PersistSaveState(std::get<uint32>(evt.value)); break;
+            case EvtType::StateSaved: persistSavedState(std::get<uint32>(evt.value)); break;
             }
         }
 
         // Update display
         if (screen.videoSync && screen.expectFrame && !m_context.paused) {
+            const auto perfWaitStart = ymir::perf::Clock::now();
             screen.frameReadyEvent.Wait();
+            ymir::perf::guiWaitNs.fetch_add(ymir::perf::NanosecondsSince(perfWaitStart), std::memory_order_relaxed);
             screen.frameReadyEvent.Reset();
             screen.expectFrame = false;
         }
@@ -2022,9 +2424,16 @@ void App::RunEmulator() {
                 screen.updated = false;
                 screen.currBackFramebuffer ^= 1u;
             }
-            const gfx::IRect area{.x = 0, .y = 0, .w = screen.width, .h = screen.height};
-            m_graphicsService.UpdateTexture(
-                swFbTexture, &area, [&](void *data, size_t pitch) { screen.CopyFramebufferToTexture(data, pitch); });
+            screen.texScale = screen.DisplayFramebufferScale();
+            if (!screen.directDisplay) {
+                const gfx::IRect area{.x = 0,
+                                      .y = 0,
+                                      .w = screen.width * screen.texScale,
+                                      .h = screen.height * screen.texScale};
+                m_graphicsService.UpdateTexture(swFbTexture, &area, [&](void *data, size_t pitch) {
+                    screen.CopyFramebufferToTexture(data, pitch);
+                });
+            }
         }
 
         auto now = clk::now();
@@ -2151,6 +2560,11 @@ void App::RunEmulator() {
         auto *viewport = ImGui::GetMainViewport();
 
         const bool drawMainMenu = [&] {
+            // On iOS all menus live in the native user interface
+            if constexpr (YMIR_PLATFORM_IOS) {
+                return false;
+            }
+
             // Always draw main menu bar in windowed mode
             if (!fullScreen) {
                 return true;
@@ -2263,6 +2677,9 @@ void App::RunEmulator() {
 
                         for (const auto &slotMeta : m_saveStateService.List()) {
                             const auto slotIndex = slotMeta.index;
+                            if (slotIndex >= services::SaveStateService::kUserSlots) {
+                                continue; // (the autosave slot isn't in the menus)
+                            }
                             const auto shortcut = input::ToShortcut(
                                 inputContext, save ? actions::save_states::GetSaveStateAction(slotIndex)
                                                    : actions::save_states::GetLoadStateAction(slotIndex));
@@ -2413,6 +2830,15 @@ void App::RunEmulator() {
                         videoSettings.fullScreen = fullScreen;
                         settings.MakeDirty();
                     }
+
+#if YMIR_PLATFORM_IOS
+                    {
+                        bool touchControlsEnabled = touchControls.IsEnabled();
+                        if (ImGui::MenuItem("Touch controls", nullptr, &touchControlsEnabled)) {
+                            touchControls.SetEnabled(touchControlsEnabled);
+                        }
+                    }
+#endif
 
                     ImGui::Separator();
 
@@ -2792,6 +3218,15 @@ void App::RunEmulator() {
                 ImGui::PopStyleVar();
             }
         }
+
+#if YMIR_PLATFORM_IOS
+        // Draw behind windows and menus so they stay usable
+        if (touchAtlasTexture != gfx::kInvalidGUITextureHandle) {
+            touchControls.Draw(ImGui::GetBackgroundDrawList(), m_graphicsService.GetImGuiTextureID(touchAtlasTexture));
+        } else {
+            touchControls.Draw(ImGui::GetBackgroundDrawList());
+        }
+#endif
 
         {
             ImGuiViewport *viewport = ImGui::GetMainViewport();
@@ -3346,6 +3781,35 @@ void App::RunEmulator() {
                 std::swap(scaledWidth, scaledHeight);
             }
 
+            // Stretch to the whole display regardless of the aspect ratio. In portrait the picture takes the full width
+            // but only part of the height, so that it still looks like a screen, and sits at the top of the display
+            bool stretchedInPortrait = false;
+            if (videoSettings.forceStretch && !fitWindowToScreen) {
+                scaledWidth = ww;
+                scaledHeight = wh;
+                if (ww < wh) {
+                    // Scale the height by the same factor as the width, so that pixels keep their shape
+                    double nativeWidth = (double)screen.width * screen.scaleX;
+                    double nativeHeight = (double)screen.height * screen.scaleY;
+                    if (!horzDisplay) {
+                        std::swap(nativeWidth, nativeHeight);
+                    }
+                    const double naturalHeight = (double)ww * nativeHeight / std::max(1.0, nativeWidth);
+                    const double t = std::clamp((double)videoSettings.portraitStretchHeight, 0.0, 1.0);
+                    scaledHeight = (int)std::min((double)wh, naturalHeight + t * ((double)wh - naturalHeight));
+                    stretchedInPortrait = true;
+                }
+            }
+
+#if YMIR_PLATFORM_IOS
+            // The player may have resized and moved the game screen in the layout editor
+            const std::optional<input::TouchControls::ScreenOverride> screenOverride = touchControls.GetScreenOverride();
+            if (screenOverride) {
+                scaledWidth = std::max(32, (int)std::lround(scaledWidth * screenOverride->scale));
+                scaledHeight = std::max(32, (int)std::lround(scaledHeight * screenOverride->scale));
+            }
+#endif
+
             // Render framebuffer to display texture
             renderDispTexture(scaledWidth, scaledHeight);
 
@@ -3371,7 +3835,38 @@ void App::RunEmulator() {
                                .y = floorf(slackY * 0.5f + menuBarHeight),
                                .w = (float)scaledWidth,
                                .h = (float)scaledHeight};
+            if (stretchedInPortrait) {
+                // Keep clear of the notch/Dynamic Island
+                SDL_Rect safeArea{};
+                float safeTop = 0.0f;
+                if (SDL_GetWindowSafeArea(screen.window, &safeArea)) {
+                    safeTop = (float)safeArea.y;
+#if defined(__APPLE__)
+                    safeTop *= SDL_GetWindowPixelDensity(screen.window);
+#endif
+                }
+                dstRect.y = floorf(safeTop + menuBarHeight);
+            }
+#if YMIR_PLATFORM_IOS
+            if (screenOverride) {
+                dstRect.x = floorf(screenOverride->centerX * (float)ww - dstRect.w * 0.5f);
+                dstRect.y = floorf(screenOverride->centerY * (float)wh + menuBarHeight - dstRect.h * 0.5f);
+            }
+#endif
             m_graphicsService.DrawTextureRotated(dispTexture, srcRect, dstRect, rotAngle);
+
+#if YMIR_PLATFORM_IOS
+            {
+                // The editor works in the same units as touch input
+                float density = 1.0f;
+    #if defined(__APPLE__)
+                density = SDL_GetWindowPixelDensity(screen.window);
+    #endif
+                density = std::max(density, 0.01f);
+                touchControls.SetScreenRect({dstRect.x / density, dstRect.y / density},
+                                            {dstRect.w / density, dstRect.h / density});
+            }
+#endif
 
             screen.scale = scale;
             screen.dCenterX = dstRect.x + dstRect.w * 0.5f;
@@ -3616,6 +4111,21 @@ void App::EmulatorThread() {
             if (m_context.emuSpeed.limitSpeed && m_context.screen.videoSync) {
                 m_emuProcessEvent.Wait();
                 m_emuProcessEvent.Reset();
+
+                // Frame delay: start the frame later, so that it reads the controls closer to when it's shown
+                auto &screen = m_context.screen;
+                const double frameDelayMs = screen.frameDelayMs.load(std::memory_order_relaxed);
+                if (frameDelayMs > 0.0 && !m_context.paused) {
+                    const auto requested = clk::time_point{clk::duration{screen.frameRequestTime.load(std::memory_order_relaxed)}};
+                    const auto start = requested + std::chrono::duration_cast<clk::duration>(
+                                                       std::chrono::duration<double, std::milli>(frameDelayMs));
+                    const auto now = clk::now();
+                    // (never hold back for longer than the delay itself, in case the request time is old)
+                    if (now < start && start - now <= std::chrono::milliseconds(20)) {
+                        std::this_thread::sleep_until(start);
+                        ymir::perf::frameDelayNs.fetch_add(ymir::perf::NanosecondsSince(now), std::memory_order_relaxed);
+                    }
+                }
             }
 
             const bool rewindEnabled = m_context.rewindBuffer.IsRunning();

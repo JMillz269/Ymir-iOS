@@ -1,0 +1,407 @@
+#include "ios_settings.hpp"
+
+#include <ymir/hw/sh2/sh2_recompiler.hpp>
+
+#include <app/events/emu_event_factory.hpp>
+#include <app/events/gui_event_factory.hpp>
+#include <app/services/graphics_service.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <memory>
+#include <string>
+#include <unordered_map>
+
+namespace app::ios {
+
+namespace {
+
+    template <typename T>
+    struct Accessor {
+        std::function<T()> get;
+        std::function<void(T)> set;
+    };
+
+    struct Tables {
+        std::unordered_map<std::string, Accessor<bool>> bools;
+        std::unordered_map<std::string, Accessor<int>> ints;
+        std::unordered_map<std::string, Accessor<float>> floats;
+    };
+
+} // namespace
+
+void ApplyVideoFilters(gfx::IGraphicsContext &graphics, const Settings &settings) {
+    graphics.SetUpscaleMode(static_cast<gfx::UpscaleMode>(std::clamp(settings.video.metalFXMode, 0, 2)));
+    graphics.SetPostProcess({.sharpness = settings.video.sharpness,
+                             .scanlines = settings.video.scanlines,
+                             .mask = settings.video.maskStrength,
+                             .sharpPixels = settings.video.sharpPixels});
+}
+
+void InstallSettingsAccessors(HostInterface &host, SharedContext &context, Settings &settings, SettingsHooks hooks) {
+    using namespace ymir;
+
+    auto tables = std::make_shared<Tables>();
+    SharedContext *ctx = &context;
+    Settings *cfg = &settings;
+
+    // All setters mark the settings as dirty so that they get saved
+    auto addBool = [&](const char *key, std::function<bool()> get, std::function<void(bool)> set) {
+        tables->bools[key] = {std::move(get), [cfg, set = std::move(set)](bool value) {
+                                  set(value);
+                                  cfg->MakeDirty();
+                              }};
+    };
+    auto addInt = [&](const char *key, std::function<int()> get, std::function<void(int)> set) {
+        tables->ints[key] = {std::move(get), [cfg, set = std::move(set)](int value) {
+                                 set(value);
+                                 cfg->MakeDirty();
+                             }};
+    };
+    auto addFloat = [&](const char *key, std::function<float()> get, std::function<void(float)> set) {
+        tables->floats[key] = {std::move(get), [cfg, set = std::move(set)](float value) {
+                                   set(value);
+                                   cfg->MakeDirty();
+                               }};
+    };
+
+    // -- Video --
+    auto applyFilters = [ctx, cfg] {
+        if (auto *graphics = ctx->serviceLocator.Get<services::GraphicsService>()) {
+            ApplyVideoFilters(graphics->GetGraphicsContext(), *cfg);
+        }
+    };
+    addBool("video.forceIntegerScaling", [cfg] { return cfg->video.forceIntegerScaling; },
+            [cfg](bool v) { cfg->video.forceIntegerScaling = v; });
+    addFloat("video.portraitStretch", [cfg] { return cfg->video.portraitStretchHeight; },
+             [cfg](float v) { cfg->video.portraitStretchHeight = std::clamp(v, 0.0f, 1.0f); });
+    addBool("video.forceStretch", [cfg] { return cfg->video.forceStretch; },
+            [cfg](bool v) { cfg->video.forceStretch = v; });
+    addBool("video.forceAspectRatio", [cfg] { return cfg->video.forceAspectRatio; },
+            [cfg](bool v) { cfg->video.forceAspectRatio = v; });
+    addInt(
+        "video.aspect",
+        [cfg] {
+            const Ratio r = cfg->video.forcedAspect;
+            if (r == Ratio{3, 2}) {
+                return 1;
+            } else if (r == Ratio{16, 10}) {
+                return 2;
+            } else if (r == Ratio{16, 9}) {
+                return 3;
+            }
+            return 0; // 4:3
+        },
+        [cfg](int v) {
+            switch (v) {
+            case 1: cfg->video.forcedAspect = {3, 2}; break;
+            case 2: cfg->video.forcedAspect = {16, 10}; break;
+            case 3: cfg->video.forcedAspect = {16, 9}; break;
+            default: cfg->video.forcedAspect = {4, 3}; break;
+            }
+        });
+    addInt("video.rotation", [cfg] { return static_cast<int>(cfg->video.rotation); },
+           [cfg](int v) { cfg->video.rotation = static_cast<Settings::Video::DisplayRotation>(std::clamp(v, 0, 3)); });
+    addBool("video.deinterlace", [cfg] { return cfg->video.enhancements.deinterlace.Get(); },
+            [cfg](bool v) { cfg->video.enhancements.deinterlace = v; });
+    addBool("video.transparentMeshes", [cfg] { return cfg->video.enhancements.transparentMeshes.Get(); },
+            [cfg](bool v) { cfg->video.enhancements.transparentMeshes = v; });
+    addInt("video.internalResolution", [cfg] { return static_cast<int>(cfg->video.enhancements.internalResolution.Get()); },
+           [cfg](int v) { cfg->video.enhancements.internalResolution = static_cast<uint32>(std::clamp(v, 1, 4)); });
+    addBool("video.metalRenderer", [cfg] { return cfg->video.useMetalRenderer.Get(); },
+            [cfg](bool v) { cfg->video.useMetalRenderer = v; });
+    addBool("video.metalVDP1", [cfg] { return cfg->video.useMetalVDP1.Get(); },
+            [cfg](bool v) { cfg->video.useMetalVDP1 = v; });
+    addBool("video.metalDirectDisplay", [cfg] { return cfg->video.useMetalDirectDisplay.Get(); },
+            [cfg](bool v) { cfg->video.useMetalDirectDisplay = v; });
+    addBool("video.skipNativeVDP1", [cfg] { return cfg->video.enhancements.skipNativeVDP1.Get(); },
+            [cfg](bool v) { cfg->video.enhancements.skipNativeVDP1 = v; });
+    addBool("video.threadedVDP1", [cfg] { return cfg->video.swRenderer.threadedVDP1.Get(); },
+            [cfg](bool v) { cfg->video.swRenderer.threadedVDP1 = v; });
+    addBool("video.threadedVDP2", [cfg] { return cfg->video.swRenderer.threadedVDP2.Get(); },
+            [cfg](bool v) { cfg->video.swRenderer.threadedVDP2 = v; });
+    addBool("video.threadedDeinterlacer", [cfg] { return cfg->video.swRenderer.threadedDeinterlacer.Get(); },
+            [cfg](bool v) { cfg->video.swRenderer.threadedDeinterlacer = v; });
+    addInt(
+        "video.upscaling", [cfg] { return cfg->video.metalFXMode; },
+        [cfg, applyFilters](int v) {
+            cfg->video.metalFXMode = std::clamp(v, 0, 2);
+            applyFilters();
+        });
+    addFloat("video.sharpness", [cfg] { return cfg->video.sharpness; },
+             [cfg, applyFilters](float v) {
+                 cfg->video.sharpness = std::clamp(v, 0.0f, 1.0f);
+                 applyFilters();
+             });
+    addFloat("video.scanlines", [cfg] { return cfg->video.scanlines; },
+             [cfg, applyFilters](float v) {
+                 cfg->video.scanlines = std::clamp(v, 0.0f, 1.0f);
+                 applyFilters();
+             });
+    addFloat("video.mask", [cfg] { return cfg->video.maskStrength; },
+             [cfg, applyFilters](float v) {
+                 cfg->video.maskStrength = std::clamp(v, 0.0f, 1.0f);
+                 applyFilters();
+             });
+    addBool("video.sharpPixels", [cfg] { return cfg->video.sharpPixels; },
+            [cfg, applyFilters](bool v) {
+                cfg->video.sharpPixels = v;
+                applyFilters();
+            });
+    tables->bools["video.upscalingSupported"] = {[ctx] {
+                                                     auto *graphics = ctx->serviceLocator.Get<services::GraphicsService>();
+                                                     return graphics != nullptr &&
+                                                            graphics->GetGraphicsContext().SupportsUpscaling();
+                                                 },
+                                                 nullptr};
+    addBool("video.sync", [cfg] { return cfg->video.syncInFullscreenMode; },
+            [cfg](bool v) { cfg->video.syncInFullscreenMode = v; });
+    addBool("video.fullRefreshRate", [cfg] { return cfg->video.useFullRefreshRateWithVideoSync; },
+            [cfg](bool v) { cfg->video.useFullRefreshRateWithVideoSync = v; });
+    addInt("video.framePacing", [cfg] { return cfg->video.framePacing; },
+           [cfg](int v) { cfg->video.framePacing = std::clamp(v, 0, 1); });
+    addInt("video.frameDelay", [cfg] { return cfg->video.frameDelay; },
+           [cfg](int v) { cfg->video.frameDelay = std::clamp(v, 0, 1); });
+    addBool("video.reduceLatency", [cfg] { return cfg->video.reduceLatency; },
+            [cfg](bool v) { cfg->video.reduceLatency = v; });
+
+    // -- Audio --
+    addFloat("audio.volume", [cfg] { return cfg->audio.volume.Get(); },
+             [cfg](float v) { cfg->audio.volume = std::clamp(v, 0.0f, 1.0f); });
+    addBool("audio.mute", [cfg] { return cfg->audio.mute.Get(); }, [cfg](bool v) { cfg->audio.mute = v; });
+    addInt("audio.interpolation", [cfg] { return static_cast<int>(cfg->audio.interpolation.Get()); },
+           [cfg](int v) {
+               cfg->audio.interpolation = v == 0 ? core::config::audio::SampleInterpolationMode::NearestNeighbor
+                                                 : core::config::audio::SampleInterpolationMode::Linear;
+           });
+    addBool("audio.threadedSCSP", [cfg] { return cfg->audio.threadedSCSP.Get(); },
+            [cfg](bool v) { cfg->audio.threadedSCSP = v; });
+    addInt("audio.stepGranularity", [cfg] { return static_cast<int>(cfg->audio.stepGranularity.Get()); },
+           [cfg](int v) { cfg->audio.stepGranularity = static_cast<uint32>(std::clamp(v, 0, 5)); });
+
+    // -- System --
+    addBool("system.autodetectRegion", [cfg] { return cfg->system.autodetectRegion.Get(); },
+            [cfg](bool v) { cfg->system.autodetectRegion = v; });
+    addInt("system.videoStandard", [cfg] { return static_cast<int>(cfg->system.videoStandard.Get()); },
+           [cfg, ctx](int v) {
+               const auto standard = v == 0 ? core::config::sys::VideoStandard::NTSC : core::config::sys::VideoStandard::PAL;
+               ctx->EnqueueEvent(events::emu::SetVideoStandard(standard));
+               cfg->system.videoStandard = standard;
+           });
+    addBool("system.emulateSH2Cache", [cfg] { return cfg->system.emulateSH2Cache; },
+            [cfg, ctx](bool v) {
+                ctx->EnqueueEvent(events::emu::SetEmulateSH2Cache(v));
+                cfg->system.emulateSH2Cache = v;
+            });
+    addBool("system.useRecompiler", [cfg] { return cfg->system.useSH2Recompiler.Get(); },
+            [cfg](bool v) { cfg->system.useSH2Recompiler = v; });
+    addBool("system.jitRegisterCache", [cfg] { return cfg->system.jitRegisterCache; },
+            [cfg](bool v) {
+                cfg->system.jitRegisterCache = v;
+                ymir::sh2::SH2Recompiler::SetOptions(cfg->system.jitRegisterCache, cfg->system.jitBlockLinking);
+            });
+    addBool("system.jitBlockLinking", [cfg] { return cfg->system.jitBlockLinking; },
+            [cfg](bool v) {
+                cfg->system.jitBlockLinking = v;
+                ymir::sh2::SH2Recompiler::SetOptions(cfg->system.jitRegisterCache, cfg->system.jitBlockLinking);
+            });
+    addBool("system.jitIdleDetection", [cfg] { return cfg->system.jitIdleDetection; },
+            [cfg](bool v) {
+                cfg->system.jitIdleDetection = v;
+                ymir::sh2::SH2Recompiler::SetIdleDetection(v);
+            });
+    addInt("system.sh2ClockFactor", [cfg] { return static_cast<int>(cfg->system.sh2ClockFactor.Get()); },
+           [cfg](int v) {
+               cfg->system.sh2ClockFactor =
+                   static_cast<uint32>(std::clamp<int>(v, config_defaults::system::kMinSH2ClockFactor,
+                                                       config_defaults::system::kMaxSH2ClockFactor));
+           });
+    addBool("system.backupRAMPerGame", [cfg] { return cfg->system.internalBackupRAMPerGame; },
+            [cfg, ctx](bool v) {
+                cfg->system.internalBackupRAMPerGame = v;
+                ctx->EnqueueEvent(events::emu::LoadInternalBackupMemory());
+            });
+    addInt("system.rtcMode", [cfg] { return static_cast<int>(cfg->system.rtc.mode.Get()); },
+           [cfg](int v) {
+               cfg->system.rtc.mode = v == 0 ? core::config::rtc::Mode::Host : core::config::rtc::Mode::Virtual;
+           });
+    addInt("system.rtcResetStrategy", [cfg] { return static_cast<int>(cfg->system.rtc.virtHardResetStrategy.Get()); },
+           [cfg](int v) {
+               using Strategy = core::config::rtc::HardResetStrategy;
+               cfg->system.rtc.virtHardResetStrategy =
+                   v == 1 ? Strategy::ResetToFixedTime : (v == 2 ? Strategy::Preserve : Strategy::SyncToHost);
+           });
+    addInt("system.iplVariant", [cfg] { return static_cast<int>(cfg->system.ipl.variant); },
+           [cfg](int v) { cfg->system.ipl.variant = static_cast<db::SystemVariant>(std::clamp(v, 0, 4)); });
+
+    // -- CD block --
+    addInt("cdblock.readSpeed", [cfg] { return static_cast<int>(cfg->cdblock.readSpeedFactor.Get()); },
+           [cfg](int v) { cfg->cdblock.readSpeedFactor = static_cast<uint8>(std::clamp(v, 2, 200)); });
+    addBool("cdblock.useLLE", [cfg] { return cfg->cdblock.useLLE; },
+            [cfg, ctx](bool v) {
+                cfg->cdblock.useLLE = v;
+                ctx->EnqueueEvent(events::emu::SetCDBlockLLE(v));
+            });
+
+    // -- Cartridge --
+    addInt("cartridge.type", [cfg] { return static_cast<int>(cfg->cartridge.type); },
+           [cfg, ctx](int v) {
+               cfg->cartridge.type = static_cast<Settings::Cartridge::Type>(std::clamp(v, 0, 3));
+               ctx->EnqueueEvent(events::emu::InsertCartridgeFromSettings());
+           });
+    addInt("cartridge.dramCapacity", [cfg] { return static_cast<int>(cfg->cartridge.dram.capacity); },
+           [cfg, ctx](int v) {
+               cfg->cartridge.dram.capacity = static_cast<Settings::Cartridge::DRAM::Capacity>(std::clamp(v, 0, 2));
+               ctx->EnqueueEvent(events::emu::InsertCartridgeFromSettings());
+           });
+    addInt("cartridge.backupCapacity", [cfg] { return static_cast<int>(cfg->cartridge.backupRAM.capacity); },
+           [cfg, ctx](int v) {
+               cfg->cartridge.backupRAM.capacity =
+                   static_cast<Settings::Cartridge::BackupRAM::Capacity>(std::clamp(v, 0, 3));
+               ctx->EnqueueEvent(events::emu::InsertCartridgeFromSettings());
+           });
+    addBool("cartridge.autoLoad", [cfg] { return cfg->cartridge.autoLoadGameCarts; },
+            [cfg](bool v) { cfg->cartridge.autoLoadGameCarts = v; });
+
+    // -- General --
+    addFloat("general.speedMain", [cfg] { return static_cast<float>(cfg->general.mainSpeedFactor.Get()); },
+             [cfg](float v) { cfg->general.mainSpeedFactor = std::clamp(std::round(v * 10.0) / 10.0, 0.1, 5.0); });
+    addFloat("general.speedAlt", [cfg] { return static_cast<float>(cfg->general.altSpeedFactor.Get()); },
+             [cfg](float v) { cfg->general.altSpeedFactor = std::clamp(std::round(v * 10.0) / 10.0, 0.1, 5.0); });
+    addBool("general.useAltSpeed", [cfg] { return cfg->general.useAltSpeed.Get(); },
+            [cfg](bool v) { cfg->general.useAltSpeed = v; });
+    addBool("general.unpauseOnDiscLoad", [cfg] { return cfg->general.unpauseOnDiscLoad; },
+            [cfg](bool v) { cfg->general.unpauseOnDiscLoad = v; });
+    addBool("general.preloadDiscImages", [cfg] { return cfg->general.preloadDiscImagesToRAM; },
+            [cfg](bool v) { cfg->general.preloadDiscImagesToRAM = v; });
+    addBool("general.boostEmuThread", [cfg] { return cfg->general.boostEmuThreadPriority; },
+            [cfg, ctx](bool v) {
+                cfg->general.boostEmuThreadPriority = v;
+                ctx->EnqueueEvent(events::emu::SetThreadPriority(v));
+            });
+    addBool("general.performanceLog", [cfg] { return cfg->general.performanceLog; },
+            [cfg](bool v) { cfg->general.performanceLog = v; });
+    addBool("general.autoSaveState", [cfg] { return cfg->general.autoSaveState; },
+            [cfg](bool v) { cfg->general.autoSaveState = v; });
+    addBool("general.pauseWhenUnfocused", [cfg] { return cfg->general.pauseWhenUnfocused; },
+            [cfg](bool v) { cfg->general.pauseWhenUnfocused = v; });
+    addBool("general.rewind", [cfg] { return cfg->general.enableRewindBuffer; },
+            [cfg, ctx](bool v) {
+                cfg->general.enableRewindBuffer = v;
+                ctx->EnqueueEvent(events::gui::EnableRewindBuffer(v));
+            });
+    addInt("general.rewindCompression", [cfg] { return cfg->general.rewindCompressionLevel; },
+           [cfg, ctx](int v) {
+               cfg->general.rewindCompressionLevel = std::clamp(v, 0, 16);
+               ctx->rewindBuffer.LZ4Accel = 1 << (16 - cfg->general.rewindCompressionLevel);
+           });
+    addInt("general.screenshotScale", [cfg] { return cfg->general.screenshotScale; },
+           [cfg](int v) { cfg->general.screenshotScale = std::clamp(v, 1, 4); });
+
+    // -- GUI --
+    addBool("gui.showFrameRate", [cfg] { return cfg->gui.showFrameRateOSD; },
+            [cfg](bool v) { cfg->gui.showFrameRateOSD = v; });
+    addInt("gui.frameRatePosition", [cfg] { return static_cast<int>(cfg->gui.frameRateOSDPosition); },
+           [cfg](int v) {
+               cfg->gui.frameRateOSDPosition = static_cast<Settings::GUI::FrameRateOSDPosition>(std::clamp(v, 0, 3));
+           });
+    addBool("gui.showMessages", [cfg] { return cfg->gui.showMessages; },
+            [cfg](bool v) { cfg->gui.showMessages = v; });
+    addBool("gui.showSpeedIndicator", [cfg] { return cfg->gui.showSpeedIndicatorForAllSpeeds; },
+            [cfg](bool v) { cfg->gui.showSpeedIndicatorForAllSpeeds = v; });
+
+    // -- Input --
+    for (int port = 0; port < 2; ++port) {
+        const std::string key = "input.port" + std::to_string(port + 1) + "Type";
+        tables->ints[key] = {
+            [cfg, port] { return static_cast<int>(cfg->input.ports[port].type.Get()); },
+            [cfg, port](int v) {
+                cfg->input.ports[port].type = static_cast<ymir::peripheral::PeripheralType>(std::clamp(v, 0, 6));
+                cfg->MakeDirty();
+            }};
+    }
+    addFloat("input.lsDeadzone", [cfg] { return cfg->input.gamepad.lsDeadzone.Get(); },
+             [cfg](float v) { cfg->input.gamepad.lsDeadzone = std::clamp(v, 0.05f, 0.9f); });
+    addFloat("input.rsDeadzone", [cfg] { return cfg->input.gamepad.rsDeadzone.Get(); },
+             [cfg](float v) { cfg->input.gamepad.rsDeadzone = std::clamp(v, 0.05f, 0.9f); });
+    addFloat("input.analogToDigital", [cfg] { return cfg->input.gamepad.analogToDigitalSensitivity.Get(); },
+             [cfg](float v) { cfg->input.gamepad.analogToDigitalSensitivity = std::clamp(v, 0.05f, 0.9f); });
+
+    // -- On-screen controls --
+    if (input::TouchControls *touch = hooks.touchControls) {
+        addBool("touch.enabled", [touch] { return touch->IsEnabled(); }, [touch](bool v) { touch->SetEnabled(v); });
+        addBool("touch.editing", [touch] { return touch->IsEditing(); }, [touch](bool v) { touch->SetEditing(v); });
+        addBool("touch.snap", [touch] { return touch->GetSnapToGrid(); }, [touch](bool v) { touch->SetSnapToGrid(v); });
+        addBool("touch.reset", [] { return false; }, [touch](bool v) {
+            if (v) {
+                touch->ResetLayout();
+            }
+        });
+        addInt("touch.selected", [touch] { return touch->SelectedElement(); }, [](int) {});
+        addBool("touch.hasSelection", [touch] { return touch->SelectedElement() >= 0; }, [](bool) {});
+        addFloat("touch.selectedScale", [touch] { return touch->GetSelectedScale(); },
+                 [touch](float v) { touch->SetSelectedScale(v); });
+        addFloat("touch.globalScale", [touch] { return touch->GetGlobalScale(); },
+                 [touch](float v) { touch->SetGlobalScale(v); });
+        addFloat("touch.opacity", [touch] { return touch->GetOpacity(); }, [touch](float v) { touch->SetOpacity(v); });
+    }
+
+    host.getPath = [cfg](const std::string &key) -> std::string {
+        if (key == "cartridge.romPath") {
+            return cfg->cartridge.rom.imagePath.string();
+        } else if (key == "cartridge.backupPath") {
+            return cfg->cartridge.backupRAM.imagePath.string();
+        } else if (key == "cdblock.romPath") {
+            return cfg->cdblock.overrideROM ? cfg->cdblock.romPath.string() : std::string{};
+        }
+        return {};
+    };
+    host.setPath = [cfg, ctx](const std::string &key, const std::string &path) {
+        const std::u8string u8path{path.begin(), path.end()};
+        if (key == "cartridge.romPath") {
+            cfg->cartridge.rom.imagePath = u8path;
+            cfg->cartridge.type = Settings::Cartridge::ROM;
+            ctx->EnqueueEvent(events::emu::InsertCartridgeFromSettings());
+        } else if (key == "cartridge.backupPath") {
+            cfg->cartridge.backupRAM.imagePath = u8path;
+            cfg->cartridge.type = Settings::Cartridge::BackupRAM;
+            ctx->EnqueueEvent(events::emu::InsertCartridgeFromSettings());
+        } else if (key == "cdblock.romPath") {
+            cfg->cdblock.overrideROM = true;
+            cfg->cdblock.romPath = u8path;
+            ctx->EnqueueEvent(events::gui::ReloadCDBlockROM());
+        } else {
+            return;
+        }
+        cfg->MakeDirty();
+    };
+    host.getBool = [tables](const std::string &key, bool defaultValue) {
+        auto it = tables->bools.find(key);
+        return it != tables->bools.end() && it->second.get ? it->second.get() : defaultValue;
+    };
+    host.setBool = [tables](const std::string &key, bool value) {
+        if (auto it = tables->bools.find(key); it != tables->bools.end() && it->second.set) {
+            it->second.set(value);
+        }
+    };
+    host.getInt = [tables](const std::string &key, int defaultValue) {
+        auto it = tables->ints.find(key);
+        return it != tables->ints.end() && it->second.get ? it->second.get() : defaultValue;
+    };
+    host.setInt = [tables](const std::string &key, int value) {
+        if (auto it = tables->ints.find(key); it != tables->ints.end() && it->second.set) {
+            it->second.set(value);
+        }
+    };
+    host.getFloat = [tables](const std::string &key, float defaultValue) {
+        auto it = tables->floats.find(key);
+        return it != tables->floats.end() && it->second.get ? it->second.get() : defaultValue;
+    };
+    host.setFloat = [tables](const std::string &key, float value) {
+        if (auto it = tables->floats.find(key); it != tables->floats.end() && it->second.set) {
+            it->second.set(value);
+        }
+    };
+}
+
+} // namespace app::ios

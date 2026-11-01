@@ -1,5 +1,9 @@
 #include "vdp2_common_params.hlsli"
 #include "vdp2_compose_params.hlsli"
+#ifdef HR_COMPOSE
+    #include "vdp2_render_params_layer.hlsli"
+    #include "vdp2_render_params_rotation.hlsli"
+#endif
 
 #include "vdp2_defs.hlsli"
 
@@ -18,6 +22,43 @@ Texture2DArray<uint> g_spriteAttrsIn : register(t5);
 Texture2D<uint> g_colorCalcWindowIn : register(t6);
 
 RWTexture2D<float4> g_compositeOut : register(u1);
+
+#ifdef HR_COMPOSE
+// Internal resolution variant: composes the scaled up image of the lines whose sprite data may have changed. It draws
+// the sprite layer (and the transparent mesh layer) of every sub-pixel itself from the scaled up VDP1 framebuffers with
+// the sprite layer pass's code, and gives the sub-pixels whose sprite data is the native pixel's the native image's
+// pixel. The other layers are the native ones.
+StructuredBuffer<LayerRenderParams> g_layerRenderParams : register(t7);
+ByteAddressBuffer g_vram : register(t8);
+Buffer<uint4> g_cramColor : register(t9);
+StructuredBuffer<RotParamBase> g_rotParamBases : register(t10);
+ByteAddressBuffer g_spriteFB : register(t11);       // the scaled up framebuffers
+ByteAddressBuffer g_spriteFBNative : register(t12); // the native framebuffers, for telling which pixels changed
+Texture2D<float4> g_compositeNative : register(t13); // the native image
+// Counts (for the log): every 64th sub-pixel that was looked at, and how many of those differ; the third word turns the
+// counting on (only while the performance log is on)
+RWByteAddressBuffer g_hrStats : register(u2);
+
+#define SPRITE_FUSED 1
+#define HR_SPRITE 1
+namespace sprite {
+#include "cs_vdp2_render_sprite.hlsl"
+}
+
+// The sprite layer pixel of the sub-pixel being composed
+static uint4 g_hrSpriteLayer;
+static uint g_hrSpriteAttrs;
+// Everything else is the same for all sub-pixels of a native pixel, so it's read once per native pixel (see
+// HRComposeSetup) and kept here: the BG layer pixels (packed RGBA), the mesh layer pixel and attributes (replaced by
+// the sub-pixel's with transparent meshes), the color calculation window, the back and line screen colors and the
+// layer stack without the sprite layer.
+static uint g_hrRBG0, g_hrNBG0RBG1, g_hrNBG1, g_hrNBG2, g_hrNBG3, g_hrMesh;
+static uint g_hrMeshSpriteAttrs;
+static uint g_hrColorCalcWindow;
+static uint g_hrBack, g_hrLine;
+static uint g_hrStack0, g_hrStack1, g_hrStack2;
+static uint g_hrPrio0, g_hrPrio1, g_hrPrio2;
+#endif
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Definitions
@@ -142,6 +183,41 @@ uint GetColorGradScreenLayerIndex(uint colorGradScreen) {
     }
 }
 
+// The sprite layer pixel and its attributes at the given position
+uint4 GetSpriteLayer(uint2 pos) {
+#ifdef HR_COMPOSE
+    return g_hrSpriteLayer;
+#else
+    return g_layerIn[uint3(pos, kLayerIndexSprite)];
+#endif
+}
+
+uint GetSpriteAttrs(uint2 pos) {
+#ifdef HR_COMPOSE
+    return g_hrSpriteAttrs;
+#else
+    return g_spriteAttrsIn[uint3(pos, 0)];
+#endif
+}
+
+uint4 GetLayerOutput(uint layer, uint2 pos);
+
+uint GetColorCalcWindow(uint2 pos) {
+#ifdef HR_COMPOSE
+    return g_hrColorCalcWindow;
+#else
+    return g_colorCalcWindowIn[pos];
+#endif
+}
+
+uint GetMeshSpriteAttrs(uint2 pos) {
+#ifdef HR_COMPOSE
+    return g_hrMeshSpriteAttrs;
+#else
+    return g_spriteAttrsIn[uint3(pos, 1)];
+#endif
+}
+
 bool IsColorCalcEnabled(uint layer, uint2 pos) {
     const bool enabled = BitTest(g_composeParams[0].colorCalcEnable, layer);
     if (layer >= kLayerBack) {
@@ -152,17 +228,17 @@ bool IsColorCalcEnabled(uint layer, uint2 pos) {
         // Color calculation is disabled for this layer
         return false;
     }
-    if (g_colorCalcWindowIn[pos] != 0) {
+    if (GetColorCalcWindow(pos) != 0) {
         return false;
     }
     const bool restrictedColorCalc = BitTest(g_commonParams.layerParams, 24);
     if (layer == kLayerSprite) {
         // Sprites use condition modes based on priority or color MSB
-        const uint layerAttrs = g_layerIn[uint3(pos, kLayerIndexSprite)].a;
+        const uint layerAttrs = GetSpriteLayer(pos).a;
         if (restrictedColorCalc && BitTest(layerAttrs, kPixelAttrBitSpecColorCalc)) {
             return false;
         }
-        const uint attrs = g_spriteAttrsIn[uint3(pos, 0)];
+        const uint attrs = GetSpriteAttrs(pos);
         const uint priority = BitExtract(layerAttrs, 0, 3);
         const uint value = BitExtract(g_commonParams.spriteParams, 12, 3);
         const uint cond = BitExtract(g_commonParams.spriteParams, 15, 2);
@@ -179,8 +255,7 @@ bool IsColorCalcEnabled(uint layer, uint2 pos) {
         return false;
     }
     // BG layers use the per-pixel special color calculation flag
-    const uint bgLayer = GetBGLayerIndex(layer);
-    const uint attrs = g_layerIn[uint3(pos.xy, bgLayer)].a;
+    const uint attrs = GetLayerOutput(layer, pos).a;
     if (restrictedColorCalc && BitTest(attrs, kPixelAttrBitPaletteFormat)) {
         return false;
     }
@@ -205,7 +280,7 @@ uint3 GetLineColor(uint layer, uint2 pos) {
 int GetColorCalcRatio(uint layer, uint2 pos) {
     switch (layer) {
         case kLayerSprite:
-            return BitExtract(g_spriteAttrsIn[uint3(pos, 0)], kSpriteAttrBitColorCalcRatio, 5);
+            return BitExtract(GetSpriteAttrs(pos), kSpriteAttrBitColorCalcRatio, 5);
         case kLayerRBG0:
         case kLayerNBG0_RBG1:
         case kLayerNBG1_EXBG:
@@ -233,9 +308,11 @@ int3 GetColorOffset(uint layer) {
     return selB ? g_composeParams[0].colorOffsetB : g_composeParams[0].colorOffsetA;
 }
 
-uint4 GetLayerOutput(uint layer, uint2 pos) {
+// Reads a layer pixel at any position
+uint4 ReadLayerOutput(uint layer, uint2 pos) {
     switch (layer) {
         case kLayerSprite:
+            return GetSpriteLayer(pos);
         case kLayerMesh:
         case kLayerRBG0:
         case kLayerNBG0_RBG1:
@@ -252,6 +329,46 @@ uint4 GetLayerOutput(uint layer, uint2 pos) {
     }
 }
 
+#ifdef HR_COMPOSE
+uint PackPixel(uint4 pixel) {
+    return pixel.r | (pixel.g << 8u) | (pixel.b << 16u) | (pixel.a << 24u);
+}
+
+uint4 UnpackPixel(uint packed) {
+    return uint4(packed & 0xFFu, (packed >> 8u) & 0xFFu, (packed >> 16u) & 0xFFu, packed >> 24u);
+}
+#endif
+
+// Reads a layer pixel at the position being composed
+uint4 GetLayerOutput(uint layer, uint2 pos) {
+#ifdef HR_COMPOSE
+    switch (layer) {
+        case kLayerSprite:
+            return g_hrSpriteLayer;
+        case kLayerMesh:
+            return UnpackPixel(g_hrMesh);
+        case kLayerRBG0:
+            return UnpackPixel(g_hrRBG0);
+        case kLayerNBG0_RBG1:
+            return UnpackPixel(g_hrNBG0RBG1);
+        case kLayerNBG1_EXBG:
+            return UnpackPixel(g_hrNBG1);
+        case kLayerNBG2:
+            return UnpackPixel(g_hrNBG2);
+        case kLayerNBG3:
+            return UnpackPixel(g_hrNBG3);
+        case kLayerBack:
+            return UnpackPixel(g_hrBack);
+        case kLayerLine:
+            return UnpackPixel(g_hrLine);
+        default:
+            return kTransparentPixel; // should never happpen
+    }
+#else
+    return ReadLayerOutput(layer, pos);
+#endif
+}
+
 struct Attributes {
     uint priority;
     bool specColorCalc;
@@ -266,6 +383,47 @@ Attributes ToAttributes(uint pixelData) {
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Compositor
+
+// Inserts the layer pixel at the position into the layer stack if it's visible
+void StackLayer(uint layer, uint2 pos, inout uint layerStack[3], inout uint layerPrios[3]) {
+    // Skip disabled layers
+    if (!IsLayerEnabled(layer)) {
+        return;
+    }
+
+    const uint4 layerOutput = GetLayerOutput(layer, pos);
+    const Attributes attrs = ToAttributes(layerOutput.a);
+
+    // Priority zero means transparent pixel
+    if (attrs.priority == 0) {
+        return;
+    }
+
+    // Skip normal shadow sprite layer pixels
+    if (layer == kLayerSprite) {
+        const uint spriteAttrs = GetSpriteAttrs(pos);
+        if (BitExtract(spriteAttrs, kSpriteAttrBitSpecial, 2) != kSpriteDataNormal) {
+            return;
+        }
+    }
+
+    // Insert the layer into the appropriate position in the stack
+    // - Higher priority beats lower priority
+    // - If same priority, lower Layer index beats higher Layer index
+    // - layerStack[0] is topmost (first) layer
+    for (int i = 0; i < 3; i++) {
+        if (attrs.priority > layerPrios[i] || (attrs.priority == layerPrios[i] && layer < layerStack[i])) {
+            // Push layers back
+            for (int j = 2; j > i; j--) {
+                layerStack[j] = layerStack[j - 1];
+                layerPrios[j] = layerPrios[j - 1];
+            }
+            layerStack[i] = layer;
+            layerPrios[i] = attrs.priority;
+            break;
+        }
+    }
+}
 
 uint3 Compose(uint2 basePos) {
     const uint2 pos = uint2(basePos.x, GetOutputY(basePos.y));
@@ -284,46 +442,20 @@ uint3 Compose(uint2 basePos) {
     // Determine layer order
     uint layerStack[3] = { kLayerBack, kLayerBack, kLayerBack };
     uint layerPrios[3] = { 0, 0, 0 };
-
+#ifdef HR_COMPOSE
+    // The BG layers are stacked already; only the sprite layer is left
+    layerStack[0] = g_hrStack0;
+    layerStack[1] = g_hrStack1;
+    layerStack[2] = g_hrStack2;
+    layerPrios[0] = g_hrPrio0;
+    layerPrios[1] = g_hrPrio1;
+    layerPrios[2] = g_hrPrio2;
+    StackLayer(kLayerSprite, pos, layerStack, layerPrios);
+#else
     for (uint layer = 0; layer < 6; layer++) {
-        // Skip disabled layers
-        if (!IsLayerEnabled(layer)) {
-            continue;
-        }
-
-        const uint4 layerOutput = GetLayerOutput(layer, pos);
-        const Attributes attrs = ToAttributes(layerOutput.a);
-
-        // Priority zero means transparent pixel
-        if (attrs.priority == 0) {
-            continue;
-        }
-
-        // Skip normal shadow sprite layer pixels
-        if (layer == kLayerSprite) {
-            const uint spriteAttrs = g_spriteAttrsIn[uint3(pos, 0)];
-            if (BitExtract(spriteAttrs, kSpriteAttrBitSpecial, 2) != kSpriteDataNormal) {
-                continue;
-            }
-        }
-
-        // Insert the layer into the appropriate position in the stack
-        // - Higher priority beats lower priority
-        // - If same priority, lower Layer index beats higher Layer index
-        // - layerStack[0] is topmost (first) layer
-        for (int i = 0; i < 3; i++) {
-            if (attrs.priority > layerPrios[i] || (attrs.priority == layerPrios[i] && layer < layerStack[i])) {
-                // Push layers back
-                for (int j = 2; j > i; j--) {
-                    layerStack[j] = layerStack[j - 1];
-                    layerPrios[j] = layerPrios[j - 1];
-                }
-                layerStack[i] = layer;
-                layerPrios[i] = attrs.priority;
-                break;
-            }
-        }
+        StackLayer(layer, pos, layerStack, layerPrios);
     }
+#endif
 
     // Find sprite mesh layer stack position
     uint meshLayer = 0xFF;
@@ -332,7 +464,7 @@ uint3 Compose(uint2 basePos) {
         const uint4 meshOutput = GetLayerOutput(kLayerMesh, pos);
         meshPixel = meshOutput.rgb;
         const Attributes meshAttrs = ToAttributes(meshOutput.a);
-        const uint meshSpriteAttrs = g_spriteAttrsIn[uint3(pos, 1)];
+        const uint meshSpriteAttrs = GetMeshSpriteAttrs(pos);
         if (meshAttrs.priority > 0 && BitExtract(meshSpriteAttrs, kSpriteAttrBitSpecial, 2) != kSpriteDataShadow) {
             for (uint i = 0; i < 3; i++) {
                 // The sprite layer has the highest priority on ties, so the priority check can be simplified.
@@ -365,8 +497,8 @@ uint3 Compose(uint2 basePos) {
 
             // Set layer 1 output to the color gradation screen where the designated screen is the topmost two layers
             if (layerStack[0] == colorGradLayer || layerStack[1] == colorGradLayer) {
-                const uint3 input2 = GetLayerOutput(colorGradLayer, uint2(max(int(pos.x) - 2, 0), pos.y)).rgb;
-                const uint3 input1 = GetLayerOutput(colorGradLayer, uint2(max(int(pos.x) - 1, 0), pos.y)).rgb;
+                const uint3 input2 = ReadLayerOutput(colorGradLayer, uint2(max(int(pos.x) - 2, 0), pos.y)).rgb;
+                const uint3 input1 = ReadLayerOutput(colorGradLayer, uint2(max(int(pos.x) - 1, 0), pos.y)).rgb;
                 const uint3 input0 = GetLayerOutput(colorGradLayer, pos).rgb;
                 layerStack[1] = colorGradLayer;
                 layer1Pixel = (((input2 + input1) >> 1u) + input0) >> 1u;
@@ -429,7 +561,7 @@ uint3 Compose(uint2 basePos) {
     const uint4 spriteOutput = GetLayerOutput(kLayerSprite, pos);
     const uint spritePriority = BitExtract(spriteOutput.a, 0, 3);
     if (spritePriority >= layerPrios[0]) {
-        const uint spriteAttrs = g_spriteAttrsIn[uint3(pos, 0)];
+        const uint spriteAttrs = GetSpriteAttrs(pos);
         const bool useSpriteWindow = BitTest(g_commonParams.spriteParams, 20);
         const bool isNormalShadow = BitExtract(spriteAttrs, kSpriteAttrBitSpecial, 2) == kSpriteDataShadow;
         const bool isMSBShadow = !useSpriteWindow && BitTest(spriteAttrs, kSpriteAttrBitShadowWindow);
@@ -476,6 +608,35 @@ uint3 Compose(uint2 basePos) {
     return output;
 }
 
+#ifdef HR_COMPOSE
+// Reads what all sub-pixels of the native pixel share and stacks the BG layers
+void HRComposeSetup(uint2 basePos) {
+    const uint2 pos = uint2(basePos.x, GetOutputY(basePos.y));
+    g_hrRBG0 = PackPixel(ReadLayerOutput(kLayerRBG0, pos));
+    g_hrNBG0RBG1 = PackPixel(ReadLayerOutput(kLayerNBG0_RBG1, pos));
+    g_hrNBG1 = PackPixel(ReadLayerOutput(kLayerNBG1_EXBG, pos));
+    g_hrNBG2 = PackPixel(ReadLayerOutput(kLayerNBG2, pos));
+    g_hrNBG3 = PackPixel(ReadLayerOutput(kLayerNBG3, pos));
+    g_hrMesh = PackPixel(ReadLayerOutput(kLayerMesh, pos));
+    g_hrBack = PackPixel(ReadLayerOutput(kLayerBack, pos));
+    g_hrLine = PackPixel(ReadLayerOutput(kLayerLine, pos));
+    g_hrMeshSpriteAttrs = g_spriteAttrsIn[uint3(pos, 1)];
+    g_hrColorCalcWindow = g_colorCalcWindowIn[pos];
+
+    uint layerStack[3] = { kLayerBack, kLayerBack, kLayerBack };
+    uint layerPrios[3] = { 0, 0, 0 };
+    for (uint layer = kLayerSprite + 1; layer < 6; layer++) {
+        StackLayer(layer, pos, layerStack, layerPrios);
+    }
+    g_hrStack0 = layerStack[0];
+    g_hrStack1 = layerStack[1];
+    g_hrStack2 = layerStack[2];
+    g_hrPrio0 = layerPrios[0];
+    g_hrPrio1 = layerPrios[1];
+    g_hrPrio2 = layerPrios[2];
+}
+#endif
+
 // ---------------------------------------------------------------------------------------------------------------------
 // Entrypoint
 
@@ -484,6 +645,105 @@ uint3 Compose(uint2 basePos) {
 void CSMain(uint3 id : SV_DispatchThreadID) {
     const uint2 drawCoord = uint2(id.x, id.y + g_commonParams.startY);
     const uint2 outCoord = uint2(drawCoord.x, GetOutputY(drawCoord.y));
+#ifdef HR_COMPOSE
+    // Internal resolution variant: composes the sub-pixels of the native pixel whose sprite data isn't the native
+    // pixel's, drawing their sprite layer first, and gives the others the native image's pixel. Sub-pixels with the
+    // same sprite layer pixel come out the same, so the last few results are kept and reused.
+    const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
+    // (the sprite layer is drawn for the native pixel being drawn, at the position it's shown at)
+    const uint2 spriteOutCoord = uint2(drawCoord.x, sprite::GetY(drawCoord.y));
+    float4 nativeColor = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    bool nativeRead = false;
+    const bool countStats = g_hrStats.Load(8) != 0u;
+    uint cacheLayer0 = 0, cacheMesh0 = 0, cacheAttrs0 = 0xFFFFFFFF, cacheColor0 = 0;
+    uint cacheLayer1 = 0, cacheMesh1 = 0, cacheAttrs1 = 0xFFFFFFFF, cacheColor1 = 0;
+    uint cacheLayer2 = 0, cacheMesh2 = 0, cacheAttrs2 = 0xFFFFFFFF, cacheColor2 = 0;
+    uint cacheLayer3 = 0, cacheMesh3 = 0, cacheAttrs3 = 0xFFFFFFFF, cacheColor3 = 0;
+    uint cacheNext = 0;
+    bool setUp = false;
+    for (uint sub = 0; sub < hrScale * hrScale; ++sub) {
+        const uint2 subPos = uint2(sub % hrScale, sub / hrScale);
+        const uint2 hrPos = outCoord * hrScale + subPos;
+        sprite::g_hrSubX = subPos.x;
+        sprite::g_hrSubY = subPos.y;
+        const bool differs = sprite::HRPixelDiffers(drawCoord);
+        const uint2 hrDrawPos = drawCoord * hrScale + subPos;
+        if (countStats && ((hrDrawPos.x | hrDrawPos.y) & 7u) == 0u) {
+            uint dummy;
+            g_hrStats.InterlockedAdd(differs ? 4 : 0, 1, dummy);
+        }
+        if (!differs) {
+            if (!nativeRead) {
+                nativeColor = g_compositeNative[outCoord];
+                nativeRead = true;
+            }
+            g_compositeOut[hrPos] = nativeColor;
+            continue;
+        }
+
+        const sprite::SpriteOutput spriteOutput = sprite::DrawSprite(drawCoord, spriteOutCoord, 0);
+        const uint4 layer = spriteOutput.layer;
+        const uint spriteAttrs = sprite::SpriteAttrs(spriteOutput);
+        const uint key = PackPixel(layer);
+        // The transparent mesh layer of the sub-pixel
+        uint meshKey = 0;
+        uint meshAttrs = 0;
+        if (transparentMeshes) {
+            const sprite::SpriteOutput meshOutput = sprite::DrawSprite(drawCoord, spriteOutCoord, 1);
+            meshKey = PackPixel(meshOutput.layer);
+            meshAttrs = sprite::SpriteAttrs(meshOutput);
+        }
+        const uint attrs = spriteAttrs | (meshAttrs << 16u);
+        uint color;
+        if (cacheAttrs0 == attrs && cacheLayer0 == key && cacheMesh0 == meshKey) {
+            color = cacheColor0;
+        } else if (cacheAttrs1 == attrs && cacheLayer1 == key && cacheMesh1 == meshKey) {
+            color = cacheColor1;
+        } else if (cacheAttrs2 == attrs && cacheLayer2 == key && cacheMesh2 == meshKey) {
+            color = cacheColor2;
+        } else if (cacheAttrs3 == attrs && cacheLayer3 == key && cacheMesh3 == meshKey) {
+            color = cacheColor3;
+        } else {
+            if (!setUp) {
+                HRComposeSetup(drawCoord);
+                setUp = true;
+            }
+            g_hrSpriteLayer = layer;
+            g_hrSpriteAttrs = spriteAttrs;
+            if (transparentMeshes) {
+                g_hrMesh = meshKey;
+                g_hrMeshSpriteAttrs = meshAttrs;
+            }
+            const uint3 rgb = Compose(drawCoord);
+            color = rgb.r | (rgb.g << 8u) | (rgb.b << 16u);
+            if (cacheNext == 0) {
+                cacheLayer0 = key;
+                cacheMesh0 = meshKey;
+                cacheAttrs0 = attrs;
+                cacheColor0 = color;
+            } else if (cacheNext == 1) {
+                cacheLayer1 = key;
+                cacheMesh1 = meshKey;
+                cacheAttrs1 = attrs;
+                cacheColor1 = color;
+            } else if (cacheNext == 2) {
+                cacheLayer2 = key;
+                cacheMesh2 = meshKey;
+                cacheAttrs2 = attrs;
+                cacheColor2 = color;
+            } else {
+                cacheLayer3 = key;
+                cacheMesh3 = meshKey;
+                cacheAttrs3 = attrs;
+                cacheColor3 = color;
+            }
+            cacheNext = (cacheNext + 1u) & 3u;
+        }
+        const uint3 rgb = uint3(color & 0xFFu, (color >> 8u) & 0xFFu, (color >> 16u) & 0xFFu);
+        g_compositeOut[hrPos] = float4(rgb / 255.0, 1.0f);
+    }
+    return;
+#endif
     const uint3 outColor = Compose(drawCoord);
     g_compositeOut[outCoord] = float4(outColor / 255.0, 1.0f);
     if (firstInterlacedFrame && !deinterlace && IsInterlaced()) {

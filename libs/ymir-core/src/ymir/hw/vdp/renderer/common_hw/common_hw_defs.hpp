@@ -2,6 +2,9 @@
 
 #include <ymir/core/types.hpp>
 
+#include <ymir/hw/vdp/vdp1_defs.hpp>
+#include <ymir/hw/vdp/vdp2_defs.hpp>
+
 #include <cmrc/cmrc.hpp>
 CMRC_DECLARE(ymir_core_shaders);
 
@@ -91,6 +94,9 @@ static_assert(sizeof(HLSLint3) == sizeof(HLSLint) * 3);
 struct EnhancementsParams {
     HLSLuint deinterlace : 1;       //     0  Deinterlace
     HLSLuint transparentMeshes : 1; //     1  Render mesh sprites as transparent
+    HLSLuint vdp1Scale : 3;         //   2-4  VDP1 internal resolution scale minus one
+    HLSLuint hrPlane : 4;           //   5-8  Scaled up plane being composed: sub-pixel row * scale + column (the VDP2
+                                    //        sprite and composition shaders of the internal resolution variants)
 };
 static_assert(sizeof(EnhancementsParams) == sizeof(HLSLuint));
 
@@ -124,6 +130,11 @@ struct alignas(16) VDP1CommonRenderParams {
     static_assert(sizeof(DisplayParams) == sizeof(HLSLuint));
 
     EnhancementsParams enhancements;
+
+    // First thread of the output merger dispatch, in units of the dispatch (a thread works on two or four pixels of a
+    // row). Lets the dispatch cover only the area that was drawn to.
+    HLSLuint mergeOriginX;
+    HLSLuint mergeOriginY;
 };
 
 /// @brief VDP1 erase parameters, appended to common rendering parameters in the erase shader.
@@ -793,10 +804,10 @@ inline constexpr size_t kVDP2CRAMColorCacheEntries = kVDP2CRAMSize / sizeof(uint
 using CRAMColorCache = std::array<ColorR8G8B8A8, kVDP2CRAMColorCacheEntries>;
 
 /// @brief Size of the VDP2 CRAM color buffer, in bytes.
-inline constexpr UINT kVDP2CRAMColorBufferSize = sizeof(CRAMColorCache);
+inline constexpr uint32 kVDP2CRAMColorBufferSize = sizeof(CRAMColorCache);
 
 /// @brief Size of the VDP2 CRAM rotation coefficients buffer, in bytes.
 /// The second half of CRAM can be used for that purpose.
-inline constexpr UINT kVDP2CRAMRotCoeffBufferSize = kVDP2CRAMSize / 2;
+inline constexpr uint32 kVDP2CRAMRotCoeffBufferSize = kVDP2CRAMSize / 2;
 
 } // namespace ymir::vdp

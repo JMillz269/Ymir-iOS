@@ -188,6 +188,12 @@ public:
     /// @return nothing on success, an error message on failure
     util::VoidResult<> SetPresentMode(gfx::PresentMode mode);
 
+    /// @brief Hints the rate at which frames are presented (0 = as fast as the display allows).
+    void SetFrameRateHint(double framesPerSecond);
+
+    /// @brief The display's refresh rate as the graphics backend knows it, or 0 if unknown.
+    double GetDisplayRefreshRate() const;
+
     /// @brief Presents the next frame.
     /// @return presentation result on success, an error message on failure.
     /// If failed, it's highly likely that the device was destroyed and needs to be reinitialized.

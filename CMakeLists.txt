@@ -1,6 +1,13 @@
 cmake_minimum_required(VERSION 3.28)
 project(Ymir VERSION 0.4.2)
 
+# The iOS user interface (game library, settings and in-game menu) is written in Swift/SwiftUI.
+# Swift is only supported by the Xcode and Ninja generators; the iOS build uses Xcode.
+if (IOS)
+    set(CMAKE_Swift_LANGUAGE_VERSION 5.0)
+    enable_language(Swift)
+endif ()
+
 # Check for Vulkan support before including CompileShaders as it depends on knowing if Vulkan
 # is available to determine whether to make SPIR-V compilation required or optional.
 # Vulkan support is excluded from macOS as the system doesn't support it natively.
@@ -61,6 +68,11 @@ endif ()
 ##   default state is a BOOL, usually OFF or ${Ymir_LOCAL_BUILD}
 option(Ymir_FF_HOST_CD_DRIVES "Enable support for reading discs from host drives" ${Ymir_LOCAL_BUILD})
 option(Ymir_FF_ENABLE_UNIMPL_GFX_BACKENDS "Enable unimplemented graphics backends" ${Ymir_LOCAL_BUILD})
+
+# iOS has no access to host drives (the macOS implementation depends on IOKit)
+if (IOS)
+    set(Ymir_FF_HOST_CD_DRIVES OFF CACHE BOOL "Enable support for reading discs from host drives" FORCE)
+endif ()
 
 if (Ymir_LIBRARY_ONLY)
     message(STATUS "Ymir: Library-only build")

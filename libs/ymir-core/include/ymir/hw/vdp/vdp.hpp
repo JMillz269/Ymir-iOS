@@ -26,6 +26,9 @@
 #include <ymir/hw/hw_defs.hpp>
 
 #include "renderer/vdp_renderer.hpp"
+#if defined(__APPLE__)
+    #include "renderer/vdp_renderer_hw_metal.hpp"
+#endif
 
 #include <ymir/util/inline.hpp>
 #include <ymir/util/result.hpp>
@@ -146,6 +149,25 @@ public:
         }
         return renderer;
     }
+
+#if defined(__APPLE__)
+    /// @brief Switches to the Metal renderer, which draws VDP2 (and optionally VDP1) on the GPU.
+    /// @param[in] device an `id<MTLDevice>`
+    /// @param[in] gpuVDP1 whether to draw VDP1 on the GPU too. If not, the software renderer draws it.
+    /// @return a pointer to the renderer, or an error message if it failed to instantiate
+    util::PointerResult<MetalVDPRenderer> UseMetalRenderer(void *device, bool gpuVDP1 = false) {
+        auto result =
+            UseRenderer<MetalVDPRenderer>(m_state, vdp2DebugRenderOptions, vdp2AccessPatternsConfig, device, gpuVDP1);
+        if (!result) {
+            return result.Error();
+        }
+        MetalVDPRenderer *renderer = result.Value();
+        if (renderer != nullptr && !gpuVDP1) {
+            renderer->EnableThreadedVDP1(m_config.swRenderer.threadedVDP1);
+        }
+        return renderer;
+    }
+#endif
 
 #if YMIR_PLATFORM_HAS_DIRECT3D
     /// @brief Switches to the Direct3D 12 renderer.
@@ -312,7 +334,7 @@ private:
 #endif
 
         renderer->Callbacks = callbacks;
-        if constexpr (std::is_same_v<T, SoftwareVDPRenderer>) {
+        if constexpr (std::derived_from<T, SoftwareVDPRenderer>) {
             renderer->SwCallbacks = m_swRendererCallbacks;
 #if YMIR_PLATFORM_HAS_DIRECT3D
         } else if constexpr (std::is_same_v<T, Direct3D12VDPRenderer>) {

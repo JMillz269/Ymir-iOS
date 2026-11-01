@@ -2,7 +2,9 @@
 
 #include <ymir/db/game_db.hpp>
 
+#include <ymir/hw/sh2/sh2_recompiler.hpp>
 #include <ymir/util/dev_log.hpp>
+#include <ymir/util/perf_counters.hpp>
 
 #include <bit>
 #include <cassert>
@@ -149,6 +151,8 @@ Saturn::Saturn()
 
     masterSH2.BindEmulateCacheOption(m_emulateSH2Caches);
     slaveSH2.BindEmulateCacheOption(m_emulateSH2Caches);
+    masterSH2.BindRecompilerOption(m_useSH2Recompiler);
+    slaveSH2.BindRecompilerOption(m_useSH2Recompiler);
 
     ConfigureAccessCycles(false);
 
@@ -160,6 +164,13 @@ Saturn::Saturn()
         [&](const std::vector<core::config::sys::Region> &regions) { UpdatePreferredRegionOrder(regions); });
     configuration.system.debugTracing.Observe([&](bool enabled) { UpdateDebugTracing(enabled); });
     configuration.system.emulateSH2Cache.Observe([&](bool enabled) { UpdateSH2CacheEmulation(enabled); });
+    configuration.system.useSH2Recompiler.Observe([&](bool enabled) {
+        m_useSH2Recompiler = enabled;
+        if (enabled) {
+            masterSH2.ResetRecompilerAvailability();
+            slaveSH2.ResetRecompilerAvailability();
+        }
+    });
     configuration.system.sh2ClockFactor.Observe([&](Ratio factor) { UpdateSH2ClockFactor(factor); });
     configuration.system.videoStandard.Observe(
         [&](core::config::sys::VideoStandard videoStandard) { UpdateVideoStandard(videoStandard); });
@@ -219,6 +230,9 @@ const sys::ClockRatios &Saturn::GetClockRatios() const noexcept {
 
 void Saturn::LoadIPL(std::span<uint8, sys::kIPLSize> ipl) {
     mem.LoadIPL(ipl);
+    // Translated code in the old IPL ROM is no longer valid (ROM is never marked as written to)
+    masterSH2.FlushRecompiler();
+    slaveSH2.FlushRecompiler();
 }
 
 void Saturn::LoadCDBlockROM(std::span<uint8, sh1::kROMSize> rom) {
@@ -512,9 +526,14 @@ void Saturn::RunFrameImpl() {
 template <bool debug, bool enableSH2Cache, bool cdblockLLE>
 bool Saturn::Run() {
     static constexpr uint64 kSH2SyncMaxStep = 32;
+    // While every CPU is waiting for something (see SH2Recompiler::SetIdleDetection) the time slices can be longer
+    static constexpr uint64 kSH2IdleSyncStep = 128;
+    const bool idleSync = !debug && sh2::SH2Recompiler::IdleDetectionEnabled();
+    uint64 coarseCycles = 0;
 
     const uint64 cycles = static_config::max_timing_granularity ? 1 : std::max<sint64>(m_scheduler.RemainingCount(), 0);
 
+    const auto perfStart = perf::Clock::now();
     uint64 execCycles;
     if (SCU.IsDMAActive()) {
         // Stall both SH2 CPUs and only run the SCU and other stuff
@@ -527,10 +546,15 @@ bool Saturn::Run() {
             uint64 slaveCycles = m_ssh2SpilloverCycles;
             do {
                 const uint64 prevExecCycles = execCycles;
-                const uint64 targetCycles = std::min(execCycles + kSH2SyncMaxStep, cycles);
+                const uint64 step =
+                    idleSync && masterSH2.IsIdle() && slaveSH2.IsIdle() ? kSH2IdleSyncStep : kSH2SyncMaxStep;
+                const uint64 targetCycles = std::min(execCycles + step, cycles);
                 execCycles = masterSH2.Advance<debug, enableSH2Cache>(targetCycles, execCycles);
                 slaveCycles = slaveSH2.Advance<debug, enableSH2Cache>(execCycles, slaveCycles);
                 SCU.Advance<debug>(execCycles - prevExecCycles);
+                if (step == kSH2IdleSyncStep) {
+                    coarseCycles += execCycles - prevExecCycles;
+                }
                 if constexpr (debug) {
                     if (m_debugBreakMgr.IsDebugBreakRaised()) {
                         break;
@@ -551,9 +575,13 @@ bool Saturn::Run() {
         } else {
             do {
                 const uint64 prevExecCycles = execCycles;
-                const uint64 targetCycles = std::min(execCycles + kSH2SyncMaxStep, cycles);
+                const uint64 step = idleSync && masterSH2.IsIdle() ? kSH2IdleSyncStep : kSH2SyncMaxStep;
+                const uint64 targetCycles = std::min(execCycles + step, cycles);
                 execCycles = masterSH2.Advance<debug, enableSH2Cache>(targetCycles, execCycles);
                 SCU.Advance<debug>(execCycles - prevExecCycles);
+                if (step == kSH2IdleSyncStep) {
+                    coarseCycles += execCycles - prevExecCycles;
+                }
                 if constexpr (debug) {
                     if (m_debugBreakMgr.IsDebugBreakRaised()) {
                         break;
@@ -562,7 +590,11 @@ bool Saturn::Run() {
             } while (execCycles < cycles);
         }
     }
+    const auto perfSH2Done = perf::Clock::now();
     VDP.Advance(execCycles);
+    if (idleSync) {
+        sh2::SH2Recompiler::NoteSliceCycles(execCycles, coarseCycles);
+    }
 
     // SCSP+M68K and CD block are ticked by the scheduler
 
@@ -581,6 +613,14 @@ bool Saturn::Run() {
     }*/
 
     m_scheduler.Advance(execCycles);
+
+    if constexpr (!debug) {
+        const auto perfEnd = perf::Clock::now();
+        using std::chrono::duration_cast;
+        using std::chrono::nanoseconds;
+        perf::sh2Ns.fetch_add(duration_cast<nanoseconds>(perfSH2Done - perfStart).count(), std::memory_order_relaxed);
+        perf::otherNs.fetch_add(duration_cast<nanoseconds>(perfEnd - perfSH2Done).count(), std::memory_order_relaxed);
+    }
 
     if constexpr (debug) {
         if (m_debugBreakMgr.LowerDebugBreak()) {

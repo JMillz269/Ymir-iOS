@@ -16,7 +16,10 @@ RWByteAddressBuffer g_fbramOut : register(u1);
 
 static const bool doubleDensity = BitTest(g_commonParams.displayParams, 3);
 static const uint drawFB = BitExtract(g_commonParams.displayParams, 7, 1);
-static const uint drawFBOffset = (drawFB ^ 1) * kVDP1FBSize;
+// Internal resolution scale; the scaled framebuffer is a 512x256 one scaled up (see the host code for what is erased)
+static const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
+static const uint hrFBBytes = kVDP1FBSize * hrScale * hrScale;
+static const uint drawFBOffset = (drawFB ^ 1) * hrFBBytes;
 
 static const bool deinterlace = BitTest(g_commonParams.enhancements, 0);
 static const bool transparentMeshes = BitTest(g_commonParams.enhancements, 1);
@@ -36,6 +39,32 @@ static const uint eraseY3 = BitExtract(g_eraseParams.coords, 22, 9) << eraseScal
 
 [numthreads(32, 32, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID) {
+    if (hrScale > 1) {
+        // Scaled framebuffer: rows of 512 * scale pixels; the area is the native one scaled up (columns up to but not
+        // including X3, rows up to and including Y3). The VBlank limit applies to the native pixel each one belongs to.
+        const uint2 hrPos = uint2(id.x * 2 + eraseX1 * hrScale, id.y + eraseY1 * hrScale);
+        if (hrPos.x >= eraseX3 * hrScale || hrPos.y >= (eraseY3 + 1) * hrScale) {
+            return;
+        }
+        if (vblankErase) {
+            const uint2 nativePos = hrPos / hrScale;
+            if (nativePos.y > vblankEraseMaxY) {
+                return;
+            }
+            if (nativePos.y == vblankEraseMaxY && nativePos.x > vblankEraseMaxX) {
+                return;
+            }
+        }
+        const uint hrWriteValue = BitExtract(g_eraseParams.erase, 0, 16);
+        const uint hrAddress = drawFBOffset + (hrPos.y * 512u * hrScale + hrPos.x) * 2;
+        g_fbramOut.Store(hrAddress, (hrWriteValue << 16u) | hrWriteValue);
+        if (transparentMeshes) {
+            // (the scaled up mesh framebuffers follow the two scaled up framebuffers)
+            g_fbramOut.Store(hrAddress + hrFBBytes * 2, 0);
+        }
+        return;
+    }
+
     // VDP1 erase process writes 16-bit words, but this shader works on 32-bit units to avoid interlocked writes.
     const uint2 pos = uint2(id.x * 2 + eraseX1, id.y + eraseY1);
 
@@ -69,13 +98,16 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 
     }
     g_fbramOut.Store(address, value);
+    // (a partial write erases the first pixel of the word only, in every buffer)
+    const uint keepMask = partialWrite ? 0xFFFF0000u : 0u;
     if (transparentMeshes) {
-        g_fbramOut.Store(address + kVDP1FBRAMSize * 2, 0);
+        g_fbramOut.Store(address + kVDP1FBRAMSize * 2, g_fbramOut.Load(address + kVDP1FBRAMSize * 2) & keepMask);
     }
     if (deinterlace && doubleDensity) {
-        g_fbramOut.Store(address + kVDP1FBRAMSize, value);
+        const uint altValue = (g_fbramOut.Load(address + kVDP1FBRAMSize) & keepMask) | (value & ~keepMask);
+        g_fbramOut.Store(address + kVDP1FBRAMSize, altValue);
         if (transparentMeshes) {
-            g_fbramOut.Store(address + kVDP1FBRAMSize * 3, 0);
+            g_fbramOut.Store(address + kVDP1FBRAMSize * 3, g_fbramOut.Load(address + kVDP1FBRAMSize * 3) & keepMask);
         }
     }
 }

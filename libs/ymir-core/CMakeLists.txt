@@ -30,6 +30,9 @@ add_library(ymir-core
 
     include/ymir/hw/hw_defs.hpp
 
+    include/ymir/jit/arm64_assembler.hpp
+    include/ymir/jit/jit_memory.hpp
+
     include/ymir/hw/cart/cart_base.hpp
     include/ymir/hw/cart/cart_impl_bup.hpp
     include/ymir/hw/cart/cart_impl_dram.hpp
@@ -90,6 +93,7 @@ add_library(ymir-core
     include/ymir/hw/sh1/sh1_wdt.hpp
 
     include/ymir/hw/sh2/sh2.hpp
+    include/ymir/hw/sh2/sh2_recompiler.hpp
     include/ymir/hw/sh2/sh2_bsc.hpp
     include/ymir/hw/sh2/sh2_cache.hpp
     include/ymir/hw/sh2/sh2_decode.hpp
@@ -150,6 +154,7 @@ add_library(ymir-core
     include/ymir/media/cd_defs.hpp
     include/ymir/media/cd_interface.hpp
     include/ymir/media/cd_utils.hpp
+    include/ymir/media/chd_convert.hpp
     include/ymir/media/disc.hpp
     include/ymir/media/filesystem.hpp
     include/ymir/media/frame_address.hpp
@@ -246,6 +251,8 @@ add_library(ymir-core
     src/ymir/core/configuration.cpp
     src/ymir/core/hash.cpp
 
+    src/ymir/jit/jit_memory.cpp
+
     src/ymir/db/cdb_rom_db.cpp
     src/ymir/db/game_db.cpp
     src/ymir/db/ipl_db.cpp
@@ -289,6 +296,7 @@ add_library(ymir-core
     #src/ymir/hw/sh1/sh1_disasm.cpp
 
     src/ymir/hw/sh2/sh2.cpp
+    src/ymir/hw/sh2/sh2_recompiler.cpp
     src/ymir/hw/sh2/sh2_decode.cpp
     src/ymir/hw/sh2/sh2_disasm.cpp
 
@@ -310,6 +318,7 @@ add_library(ymir-core
     src/ymir/media/cd_device/cd_device_host.cpp
     src/ymir/media/cd_device/cd_device_image.cpp
 
+    src/ymir/media/chd_convert.cpp
     src/ymir/media/loader/loader.cpp
     src/ymir/media/loader/loader_bin_cue.cpp
     src/ymir/media/loader/loader_chd.cpp
@@ -387,9 +396,22 @@ if (WIN32)
             src/ymir/hw/vdp/renderer/d3d12/d3d12_upload_buffer.hpp
     )
 elseif (APPLE)
-    target_sources(ymir-core PRIVATE
-        src/ymir/gpu/shaders/gpu_shaders_macos.cpp
+    target_sources(ymir-core
+        PUBLIC
+            include/ymir/hw/vdp/renderer/vdp_renderer_hw_metal.hpp
+
+        PRIVATE
+            src/ymir/gpu/shaders/gpu_shaders_macos.cpp
+
+            src/ymir/hw/vdp/renderer/vdp_renderer_hw_metal.cpp
+            src/ymir/hw/vdp/renderer/metal/metal_gpu.hpp
+            src/ymir/hw/vdp/renderer/metal/metal_gpu.mm
+            src/ymir/hw/vdp/renderer/metal/metal_vdp1.hpp
     )
+    set_source_files_properties(src/ymir/hw/vdp/renderer/metal/metal_gpu.mm PROPERTIES
+                                SKIP_PRECOMPILE_HEADERS ON
+                                COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(ymir-core PUBLIC "-framework Metal" "-framework Foundation")
 elseif (UNIX) # Linux and FreeBSD
     target_sources(ymir-core PRIVATE
         src/ymir/gpu/shaders/gpu_shaders_unixlike.cpp
@@ -411,10 +433,17 @@ set(SHADER_OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
 set(COMPUTE_SHADER_SOURCES
     res/shaders/src/vdp/cs_vdp1_erase.hlsl
     res/shaders/src/vdp/cs_vdp1_fbram_write.hlsl
+    res/shaders/src/vdp/cs_vdp1_hr_fbram_write.hlsl
+    res/shaders/src/vdp/cs_vdp1_hr_resync.hlsl
+    res/shaders/src/vdp/cs_vdp1_hr_downsample.hlsl
 
     res/shaders/src/vdp/cs_vdp2_compose.hlsl
     res/shaders/src/vdp/cs_vdp2_render_bgs.hlsl
     res/shaders/src/vdp/cs_vdp2_render_sprite.hlsl
+
+    # Internal resolution variant of the VDP2 composition pass (which draws the sprite layer of the sub-pixels itself)
+    "res/shaders/src/vdp/cs_vdp2_compose.hlsl|hr|HR_COMPOSE=1"
+    res/shaders/src/vdp/cs_vdp2_hr_replicate.hlsl
 )
 
 # Generate shader specializations
@@ -435,6 +464,15 @@ foreach (_transparent_mesh RANGE 1)
         set(_macros_merge_mode "POLYSPEC_MERGE_MODE=${_merge_mode}")
         set(_macros "${_macros_transparent_mesh}|${_macros_merge_mode}")
         list(APPEND COMPUTE_SHADER_SOURCES "res/shaders/src/vdp/cs_vdp1_output_merger.hlsl|${_variant_name}|${_macros}")
+    endforeach ()
+endforeach ()
+
+# Polygon drawing variants that find the span of a pixel through a table instead of searching (used by the Metal
+# renderer)
+foreach (_mesh_mode RANGE 1)
+    foreach (_shading_mode RANGE 3)
+        set(_macros "POLYSPEC_TRANSPARENT_MESH=${_mesh_mode}|POLYSPEC_SHADING_MODE=${_shading_mode}|POLYSPEC_SPAN_TABLE=1|POLYSPEC_PIXELS_PER_THREAD=4")
+        list(APPEND COMPUTE_SHADER_SOURCES "res/shaders/src/vdp/cs_vdp1_polydraw.hlsl|${_mesh_mode}_${_shading_mode}_st|${_macros}")
     endforeach ()
 endforeach ()
 
@@ -474,6 +512,7 @@ foreach (SHADER_SRC ${COMPUTE_SHADER_SOURCES})
         VARIANT ${_variant}
         MACROS ${_macros}
         INCLUDE_PATHS "${SHADER_INPUT_DIR}/include"
+        VK_DX_LAYOUT
     )
     list(APPEND COMPILED_SHADERS ${SHADER_BINARY_FILES})
     list(APPEND COMPILED_SHADERS_SOURCE_PATHS ${_shader_src_path})
@@ -500,6 +539,14 @@ cmrc_add_resource_library(ymir-core-shaders
     ${COMPILED_SHADERS}
 )
 
+
+## Writing CHD files needs a deflate compressor. The app builds have zlib; a library-only build uses the system's if there
+## is one and otherwise can't convert.
+find_package(ZLIB QUIET)
+if (ZLIB_FOUND)
+    target_link_libraries(ymir-core PRIVATE ZLIB::ZLIB)
+    target_compile_definitions(ymir-core PRIVATE Ymir_HAS_ZLIB=1)
+endif ()
 
 ## Add dependencies
 target_link_libraries(ymir-core PUBLIC

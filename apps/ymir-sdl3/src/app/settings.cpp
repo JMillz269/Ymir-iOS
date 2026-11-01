@@ -1,3 +1,4 @@
+#include <ymir/hw/sh2/sh2_recompiler.hpp>
 #include "settings.hpp"
 
 #include <app/shared_context.hpp>
@@ -11,6 +12,7 @@
 #include <ymir/util/fmt_ratio.hpp>
 
 #include <util/math.hpp>
+#include <util/platform.hpp>
 
 #include <cassert>
 #include <concepts>
@@ -1020,6 +1022,7 @@ void Settings::ResetToDefaults() {
     general.preloadDiscImagesToRAM = false;
     general.rememberLastLoadedDisc = false;
     general.boostEmuThreadPriority = true;
+    general.performanceLog = false;
     general.boostProcessPriority = true;
     general.screenshotScale = 2;
 
@@ -1030,7 +1033,9 @@ void Settings::ResetToDefaults() {
     general.altSpeedFactor = 0.5;
     general.useAltSpeed = false;
 
-    general.pauseWhenUnfocused = false;
+    // (on a phone: pulling down the control center, a notification, the app switcher or a call take the focus away)
+    general.pauseWhenUnfocused = YMIR_PLATFORM_IOS != 0;
+    general.autoSaveState = true;
     general.unpauseOnDiscLoad = true;
     general.startPaused = false;
 
@@ -1059,6 +1064,10 @@ void Settings::ResetToDefaults() {
     system.videoStandard = config::sys::VideoStandard::NTSC;
 
     system.emulateSH2Cache = false;
+    system.useSH2Recompiler = false;
+    system.jitRegisterCache = true;
+    system.jitBlockLinking = true;
+    system.jitIdleDetection = false;
     system.sh2ClockFactor = config_defaults::system::kDefaultSH2ClockFactor;
 
     system.ipl.overrideImage = false;
@@ -1124,6 +1133,15 @@ void Settings::ResetToDefaults() {
     video.syncInFullscreenMode = true;
     video.useFullRefreshRateWithVideoSync = false;
     video.reduceLatency = true;
+    video.metalFXMode = 0;
+    video.frameDelay = YMIR_PLATFORM_IOS != 0 ? 1 : 0; // Auto on a phone (see UpdateFrameDelay)
+    video.framePacing = 1; // Match Display: steadiest on iPhone (a frame held over about every 5 s instead of about every second)
+    video.forceStretch = false;
+    video.portraitStretchHeight = 0.0f;
+    video.sharpness = 0.0f;
+    video.scanlines = 0.0f;
+    video.maskStrength = 0.0f;
+    video.sharpPixels = false;
     video.fullScreen = false;
     video.doubleClickToFullScreen = false;
     video.borderlessFullScreen = true;
@@ -1136,18 +1154,23 @@ void Settings::ResetToDefaults() {
     video.fullScreenMode.refreshRate = 0.0f;
     video.fullScreenMode.pixelDensity = 0.0f;
     video.useHardwareAcceleration = false;
+    video.useMetalRenderer = false;
+    video.useMetalVDP1 = false;
+    video.useMetalDirectDisplay = true;
     video.swRenderer.threadedVDP1 = true;
     video.swRenderer.threadedVDP2 = true;
     video.swRenderer.threadedDeinterlacer = true;
     video.enhancements.deinterlace = false;
     video.enhancements.transparentMeshes = false;
+    video.enhancements.internalResolution = 1;
+    video.enhancements.skipNativeVDP1 = false;
 
     audio.volume = 0.8;
     audio.mute = false;
 
     audio.interpolation = config::audio::SampleInterpolationMode::Linear;
 
-    audio.threadedSCSP = false;
+    audio.threadedSCSP = YMIR_PLATFORM_IOS != 0; // (cheap on a phone since the sound thread sleeps between batches)
 
     audio.stepGranularity = 0;
 
@@ -1171,6 +1194,7 @@ void Settings::BindConfiguration(ymir::core::Configuration &config) {
     system.autodetectRegion.Observe(config.system.autodetectRegion);
     system.preferredRegionOrder.Observe([&](auto value) { config.system.preferredRegionOrder = value; });
     system.videoStandard.Observe([&](auto value) { config.system.videoStandard = value; });
+    system.useSH2Recompiler.Observe([&](auto value) { config.system.useSH2Recompiler = value; });
     system.sh2ClockFactor.ObserveAndNotify(
         [&](auto value) { m_context.EnqueueEvent(events::emu::SetSH2ClockFactor(value)); });
 
@@ -1229,6 +1253,7 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblGeneral, "PreloadDiscImagesToRAM", general.preloadDiscImagesToRAM);
         Parse(tblGeneral, "RememberLastLoadedDisc", general.rememberLastLoadedDisc);
         Parse(tblGeneral, "BoostEmuThreadPriority", general.boostEmuThreadPriority);
+        Parse(tblGeneral, "PerformanceLog", general.performanceLog);
         Parse(tblGeneral, "BoostProcessPriority", general.boostProcessPriority);
         Parse(tblGeneral, "EnableRewindBuffer", general.enableRewindBuffer);
         Parse(tblGeneral, "ScreenshotScale", general.screenshotScale);
@@ -1237,6 +1262,7 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblGeneral, "AltSpeedFactor", general.altSpeedFactor);
         Parse(tblGeneral, "UseAltSpeed", general.useAltSpeed);
         Parse(tblGeneral, "PauseWhenUnfocused", general.pauseWhenUnfocused);
+        Parse(tblGeneral, "AutoSaveState", general.autoSaveState);
         Parse(tblGeneral, "UnpauseOnDiscLoadd", general.unpauseOnDiscLoad);
         Parse(tblGeneral, "StartPaused", general.startPaused);
         Parse(tblGeneral, "CheckForUpdates", general.checkForUpdates);
@@ -1288,6 +1314,12 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblSystem, "AutoDetectRegion", system.autodetectRegion);
         Parse(tblSystem, "PreferredRegionOrder", system.preferredRegionOrder);
         Parse(tblSystem, "EmulateSH2Cache", system.emulateSH2Cache);
+        Parse(tblSystem, "UseSH2Recompiler", system.useSH2Recompiler);
+        Parse(tblSystem, "JitRegisterCache", system.jitRegisterCache);
+        Parse(tblSystem, "JitBlockLinking", system.jitBlockLinking);
+        ymir::sh2::SH2Recompiler::SetOptions(system.jitRegisterCache, system.jitBlockLinking);
+        Parse(tblSystem, "JitIdleDetection", system.jitIdleDetection);
+        ymir::sh2::SH2Recompiler::SetIdleDetection(system.jitIdleDetection);
         Parse(tblSystem, "SH2ClockFactor", system.sh2ClockFactor, kDefaultSH2ClockFactor, kMinSH2ClockFactor,
               kMaxSH2ClockFactor);
         Parse(tblSystem, "InternalBackupRAMImagePath", system.internalBackupRAMImagePath);
@@ -1621,6 +1653,22 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
         Parse(tblVideo, "SyncInFullscreenMode", video.syncInFullscreenMode);
         Parse(tblVideo, "UseFullRefreshRateWithVideoSync", video.useFullRefreshRateWithVideoSync);
         Parse(tblVideo, "ReduceLatency", video.reduceLatency);
+        Parse(tblVideo, "ForceStretch", video.forceStretch);
+        Parse(tblVideo, "PortraitStretchHeight", video.portraitStretchHeight);
+        video.portraitStretchHeight = std::clamp(video.portraitStretchHeight, 0.0f, 1.0f);
+        Parse(tblVideo, "MetalFXMode", video.metalFXMode);
+        Parse(tblVideo, "FramePacing", video.framePacing);
+        Parse(tblVideo, "FrameDelay", video.frameDelay);
+        video.frameDelay = std::clamp(video.frameDelay, 0, 1);
+        video.framePacing = std::clamp(video.framePacing, 0, 1);
+        video.metalFXMode = std::clamp(video.metalFXMode, 0, 2);
+        Parse(tblVideo, "Sharpness", video.sharpness);
+        Parse(tblVideo, "Scanlines", video.scanlines);
+        Parse(tblVideo, "MaskStrength", video.maskStrength);
+        Parse(tblVideo, "SharpPixels", video.sharpPixels);
+        video.sharpness = std::clamp(video.sharpness, 0.0f, 1.0f);
+        video.scanlines = std::clamp(video.scanlines, 0.0f, 1.0f);
+        video.maskStrength = std::clamp(video.maskStrength, 0.0f, 1.0f);
         Parse(tblVideo, "FullScreen", video.fullScreen);
         Parse(tblVideo, "DoubleClickToFullScreen", video.doubleClickToFullScreen);
         if (auto tblFullScreenDisplay = tblVideo["FullScreenDisplay"]) {
@@ -1644,6 +1692,9 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
                 Parse(tblSwRenderer, "ThreadedDeinterlacer", video.swRenderer.threadedDeinterlacer);
             }
             Parse(tblVideo, "UseHardwareAcceleration", video.useHardwareAcceleration);
+            Parse(tblVideo, "UseMetalRenderer", video.useMetalRenderer);
+            Parse(tblVideo, "UseMetalVDP1", video.useMetalVDP1);
+            Parse(tblVideo, "UseMetalDirectDisplay", video.useMetalDirectDisplay);
         } else {
             if (configVersion >= 4) {
                 Parse(tblVideo, "ThreadedVDP1", video.swRenderer.threadedVDP1);
@@ -1662,6 +1713,8 @@ SettingsLoadResult Settings::Load(const std::filesystem::path &path) {
             if (auto tblEnhancements = tblVideo["Enhancements"]) {
                 Parse(tblEnhancements, "Deinterlace", video.enhancements.deinterlace);
                 Parse(tblEnhancements, "TransparentMeshes", video.enhancements.transparentMeshes);
+                Parse(tblEnhancements, "InternalResolution", video.enhancements.internalResolution, 1u, 1u, 4u);
+                Parse(tblEnhancements, "SkipNativeVDP1", video.enhancements.skipNativeVDP1);
             }
         } else {
             Parse(tblVideo, "Deinterlace", video.enhancements.deinterlace);
@@ -1878,6 +1931,7 @@ SettingsSaveResult Settings::Save() {
             {"PreloadDiscImagesToRAM", general.preloadDiscImagesToRAM},
             {"RememberLastLoadedDisc", general.rememberLastLoadedDisc},
             {"BoostEmuThreadPriority", general.boostEmuThreadPriority},
+            {"PerformanceLog", general.performanceLog},
             {"BoostProcessPriority", general.boostProcessPriority},
             {"EnableRewindBuffer", general.enableRewindBuffer},
             {"ScreenshotScale", general.screenshotScale},
@@ -1886,6 +1940,7 @@ SettingsSaveResult Settings::Save() {
             {"AltSpeedFactor", general.altSpeedFactor.Get()},
             {"UseAltSpeed", general.useAltSpeed.Get()},
             {"PauseWhenUnfocused", general.pauseWhenUnfocused},
+            {"AutoSaveState", general.autoSaveState},
             {"UnpauseOnDiscLoad", general.unpauseOnDiscLoad},
             {"StartPaused", general.startPaused},
             {"CheckForUpdates", general.checkForUpdates},
@@ -1922,6 +1977,10 @@ SettingsSaveResult Settings::Save() {
             {"AutoDetectRegion", system.autodetectRegion.Get()},
             {"PreferredRegionOrder", ToTOML(system.preferredRegionOrder.Get())},
             {"EmulateSH2Cache", system.emulateSH2Cache},
+            {"UseSH2Recompiler", system.useSH2Recompiler.Get()},
+            {"JitRegisterCache", system.jitRegisterCache},
+            {"JitBlockLinking", system.jitBlockLinking},
+            {"JitIdleDetection", system.jitIdleDetection},
             {"SH2ClockFactor", system.sh2ClockFactor.Get()},
             {"InternalBackupRAMImagePath", Proximate(ProfilePath::PersistentState, system.internalBackupRAMImagePath).native()},
             {"InternalBackupRAMPerGame", system.internalBackupRAMPerGame},
@@ -2052,6 +2111,15 @@ SettingsSaveResult Settings::Save() {
             {"SyncInFullscreenMode", video.syncInFullscreenMode},
             {"UseFullRefreshRateWithVideoSync", video.useFullRefreshRateWithVideoSync},
             {"ReduceLatency", video.reduceLatency},
+            {"ForceStretch", video.forceStretch},
+            {"PortraitStretchHeight", video.portraitStretchHeight},
+            {"MetalFXMode", video.metalFXMode},
+            {"FramePacing", video.framePacing},
+            {"FrameDelay", video.frameDelay},
+            {"Sharpness", video.sharpness},
+            {"Scanlines", video.scanlines},
+            {"MaskStrength", video.maskStrength},
+            {"SharpPixels", video.sharpPixels},
             {"FullScreen", video.fullScreen.Get()},
             {"DoubleClickToFullScreen", video.doubleClickToFullScreen},
             {"FullScreenDisplay", toml::table{{
@@ -2073,9 +2141,14 @@ SettingsSaveResult Settings::Save() {
                 {"ThreadedDeinterlacer", video.swRenderer.threadedDeinterlacer.Get()},
             }}},
             {"UseHardwareAcceleration", video.useHardwareAcceleration.Get()},
+            {"UseMetalRenderer", video.useMetalRenderer.Get()},
+            {"UseMetalVDP1", video.useMetalVDP1.Get()},
+            {"UseMetalDirectDisplay", video.useMetalDirectDisplay.Get()},
             {"Enhancements", toml::table{{
                 {"Deinterlace", video.enhancements.deinterlace.Get()},
                 {"TransparentMeshes", video.enhancements.transparentMeshes.Get()},
+                {"InternalResolution", video.enhancements.internalResolution.Get()},
+                {"SkipNativeVDP1", video.enhancements.skipNativeVDP1.Get()},
             }}},
         }}},
 

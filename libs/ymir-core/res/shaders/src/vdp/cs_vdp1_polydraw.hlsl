@@ -63,6 +63,10 @@ StructuredBuffer<PolySpan> g_spanParams : register(t1);
 Buffer<uint> g_spanPrefixSums : register(t2);
 StructuredBuffer<CommandParams> g_commandParams : register(t3);
 ByteAddressBuffer g_vram : register(t4);
+#if POLYSPEC_SPAN_TABLE
+// The span that holds the first pixel of every group of 64 pixels (lets threads find their span without searching)
+Buffer<uint> g_spanBlockStarts : register(t5);
+#endif
 
 #if POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_OIT
 
@@ -86,10 +90,14 @@ RWBuffer<uint> g_internalSpriteOut : register(u1);
 // ---------------------------------------------------------------------------------------------------------------------
 // Parameters
 
+// Internal resolution scale; the framebuffer is then a larger one drawn with scaled coordinates
+static const uint hrScale = BitExtract(g_commonParams.enhancements, 2, 3) + 1u;
 static const uint2 fbSize = uint2(
     512u << BitExtract(g_commonParams.displayParams, 0, 1),
     256u << BitExtract(g_commonParams.displayParams, 1, 1)
-);
+) * hrScale;
+// Size of one framebuffer in bytes
+static const uint fbBytes = kVDP1FBSize * hrScale * hrScale;
 static const bool pixel8Bits = BitTest(g_commonParams.displayParams, 2);
 static const bool doubleDensity = BitTest(g_commonParams.displayParams, 3);
 static const bool dblInterlaceEnable = BitTest(g_commonParams.displayParams, 4);
@@ -97,6 +105,10 @@ static const uint dblInterlaceDrawLine = BitExtract(g_commonParams.displayParams
 static const bool evenOddCoordSelect = BitTest(g_commonParams.displayParams, 6);
 
 static const bool deinterlace = BitTest(g_commonParams.enhancements, 0);
+
+// The transparent mesh output comes after the alternate field's at the native size, and right after the main output in
+// the scaled up passes (which never draw both fields)
+static const uint meshPlane = hrScale > 1 ? 1u : 2u;
 
 // ---------------------------------------------------------------------------------------------------------------------
 // Helpers
@@ -107,6 +119,15 @@ uint GetSpanIndex(uint pixelIndex) {
     if (pixelIndex >= g_spanPrefixSums[g_polyDrawParams.numSpans]) {
         return 0xFFFFFFFF;
     }
+
+#if POLYSPEC_SPAN_TABLE
+    // Start at the span of the first pixel of the group and move on to the one holding this pixel
+    uint span = g_spanBlockStarts[pixelIndex >> 6u];
+    while (g_spanPrefixSums[span + 1u] <= pixelIndex) {
+        ++span;
+    }
+    return span;
+#endif
 
     // Binary search for smallest span index where pixelIndex >= prefixSum.
     // The span prefix sums array always contains [0, ..., total length].
@@ -141,6 +162,28 @@ uint ReadVRAM16(uint address) {
 
 // ---------------------------------------------------------------------------------------------------------------------
 // DDA steppers
+
+// a / b rounded down for a >= 0 and b > 0 where the quotient is below 2^21. GPUs divide integers slowly in software,
+// so this divides floats and corrects the result, which can be off by a little, to the exact quotient.
+int DivFloor(int a, int b) {
+    int q = int(float(a) / float(b));
+    int r = a - q * b;
+    if (r < 0) {
+        --q;
+        r += b;
+        if (r < 0) {
+            --q;
+            r += b;
+        }
+    } else if (r >= b) {
+        ++q;
+        r -= b;
+        if (r >= b) {
+            ++q;
+        }
+    }
+    return q;
+}
 
 // Steps over the texels of a texture.
 struct TextureStepper {
@@ -201,7 +244,7 @@ struct TextureStepper {
         accum = baseAccum + num * step;
         value = baseValue;
         if (accum >= 0) {
-            const int count = (accum / den) + 1;
+            const int count = DivFloor(accum, den) + 1;
             value += inc * count;
             accum -= den * count;
         }
@@ -250,14 +293,17 @@ struct GouraudChannelStepper {
         den <<= 1;
 
         if (den != 0) {
-            while (accum >= 0) {
-                value += fracInc;
-                accum -= den;
+            // Closed forms of stepping until accum < 0 and num < den
+            if (accum >= 0) {
+                const int count = DivFloor(accum, den) + 1;
+                value += fracInc * count;
+                accum -= den * count;
             }
 
-            while (num >= den) {
-                intInc += fracInc;
-                num -= den;
+            if (num >= den) {
+                const int count = DivFloor(num, den);
+                intInc += fracInc * count;
+                num -= den * count;
             }
         }
         accum = ~accum;
@@ -270,11 +316,11 @@ struct GouraudChannelStepper {
     void Skip(int steps) {
         value += intInc * steps;
         accum -= num * steps;
-        if (den != 0) {
-            while (accum < 0) {
-                value += fracInc;
-                accum += den;
-            }
+        if (den != 0 && accum < 0) {
+            // Closed form of stepping until accum >= 0
+            const int count = DivFloor(den - 1 - accum, den);
+            value += fracInc * count;
+            accum += den * count;
         }
     }
 
@@ -412,7 +458,7 @@ struct LineStepper {
 
         accum -= num * stepDelta;
         if (den != 0) {
-            const int count = (accumTarget - accum + den) / den;
+            const int count = DivFloor(accumTarget - accum + den, den);
             accum += den * count;
             pos += minInc * count;
         }
@@ -487,12 +533,13 @@ void ReadTexel(uint u, uint v, uint charAddress, uint charSizeH, uint colorMode,
 
 struct OutData {
     uint cmdIndex;
+    uint fragmentSlot; // first of the two fragment slots of the pixel (Half-Transparency)
 #if POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_COPY || POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_OIT
     uint value;
 #endif
 };
 
-void WriteOutput(int2 coord, OutData data) {
+void WriteOutput(int2 coord, OutData data, uint outSlot) {
     const CommandParams cmdParams = g_commandParams[data.cmdIndex];
 
     // Clip to system area
@@ -523,7 +570,12 @@ void WriteOutput(int2 coord, OutData data) {
 
     // Mesh checkerboard test
     const bool meshEnable = BitTest(cmdParams.cmdpmodcolr, 8);
-    if (!POLYSPEC_TRANSPARENT_MESH && meshEnable && BitTest(coord.x ^ coord.y, 0)) {
+    if (!POLYSPEC_TRANSPARENT_MESH && meshEnable && BitTest((coord.x / (int)hrScale) ^ (coord.y / (int)hrScale), 0)) {
+        return;
+    }
+
+    // The scaled framebuffer doesn't wrap around
+    if (hrScale > 1 && (coord.x >= (int)fbSize.x || coord.y >= (int)fbSize.y)) {
         return;
     }
 
@@ -531,7 +583,7 @@ void WriteOutput(int2 coord, OutData data) {
 
 #if POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_MSB
     const uint drawFB = BitExtract(g_commonParams.displayParams, 7, 1);
-    uint fbOffset = drawFB * kVDP1FBSize;
+    uint fbOffset = drawFB * fbBytes;
 #endif
 
     // Interlace line selection
@@ -551,9 +603,10 @@ void WriteOutput(int2 coord, OutData data) {
 
     outOffset += coord.y * fbSize.x + coord.x;
 
-#if POLYSPEC_TRANSPARENT_MESH
+#if POLYSPEC_TRANSPARENT_MESH && POLYSPEC_SHADING_MODE != POLYSPEC_SHADING_MODE_MSB
+    // (like the software renderer, MSB On sets the bit in the framebuffer for mesh sprites too)
     if (meshEnable) {
-        outOffset += fbSize.x * fbSize.y * 2;
+        outOffset += fbSize.x * fbSize.y * meshPlane;
     }
 #endif
 
@@ -580,8 +633,13 @@ void WriteOutput(int2 coord, OutData data) {
 
     // Append entry to pixel's node list
 
-    uint nodeIndex;
-    g_counter.InterlockedAdd(0, 1, nodeIndex);
+    // Every pixel of the spans has two fragment slots (one for the pixel and one for the antialiasing pixel it can add)
+    // so that threads don't have to compete for a shared counter.
+    const uint nodeIndex = data.fragmentSlot + (outSlot & 1u);
+    if (nodeIndex >= kMaxOITFragments) {
+        // Out of fragments (the host code keeps this from happening)
+        return;
+    }
 
     uint oldHead;
     InterlockedExchange(g_listHeads[outOffset], nodeIndex, oldHead);
@@ -612,17 +670,10 @@ void WriteOutput(int2 coord, OutData data) {
 // ---------------------------------------------------------------------------------------------------------------------
 // Entrypoint
 
-[numthreads(64, 1, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID) {
-    const uint spanIndex = GetSpanIndex(id.x);
-    if (spanIndex == 0xFFFFFFFF) {
-        return;
-    }
-
-    const PolySpan span = g_spanParams[spanIndex];
-    const uint spanStep = id.x - g_spanPrefixSums[spanIndex] + BitExtract(span.skip_cmdIndex, 0, 16);
+// Draws the pixel of the pixel sequence at the index, which is in the span at the index
+void DrawPixel(uint pixelIndex, uint spanIndex, PolySpan span, uint spanFirstPixel, CommandParams cmdParams) {
+    const uint spanStep = pixelIndex - spanFirstPixel + BitExtract(span.skip_cmdIndex, 0, 16);
     const uint cmdIndex = BitExtract(span.skip_cmdIndex, 16, 16);
-    const CommandParams cmdParams = g_commandParams[cmdIndex];
 
     const bool antialias = BitTest(span.attrs, 0);
     const bool textured = BitTest(span.attrs, 1);
@@ -694,6 +745,7 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 
     OutData data;
     data.cmdIndex = cmdIndex;
+    data.fragmentSlot = pixelIndex * 2u;
 
 #if POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_COPY || POLYSPEC_SHADING_MODE == POLYSPEC_SHADING_MODE_OIT
     // =========================================================================
@@ -728,8 +780,46 @@ void CSMain(uint3 id : SV_DispatchThreadID) {
 #endif
 
     const int2 coord = lineStepper.Coord();
-    WriteOutput(lineStepper.Coord(), data);
+    WriteOutput(lineStepper.Coord(), data, 0u);
     if (antialias && lineStepper.NeedsAA()) {
-        WriteOutput(lineStepper.AACoord(), data);
+        WriteOutput(lineStepper.AACoord(), data, 1u);
+    }
+}
+
+#ifndef POLYSPEC_PIXELS_PER_THREAD
+    #define POLYSPEC_PIXELS_PER_THREAD 1
+#endif
+
+// Every thread draws POLYSPEC_PIXELS_PER_THREAD consecutive pixels of the sequence, so that finding the span and reading
+// its parameters is shared by them (the host dispatches that many times fewer threads)
+[numthreads(64, 1, 1)]
+void CSMain(uint3 id : SV_DispatchThreadID) {
+    const uint firstPixel = id.x * POLYSPEC_PIXELS_PER_THREAD;
+    uint spanIndex = GetSpanIndex(firstPixel);
+    if (spanIndex == 0xFFFFFFFF) {
+        return;
+    }
+    const uint numPixels = g_spanPrefixSums[g_polyDrawParams.numSpans];
+
+    uint spanFirstPixel = g_spanPrefixSums[spanIndex];
+    uint spanEnd = g_spanPrefixSums[spanIndex + 1u];
+    PolySpan span = g_spanParams[spanIndex];
+    CommandParams cmdParams = g_commandParams[BitExtract(span.skip_cmdIndex, 16, 16)];
+    for (uint i = 0; i < POLYSPEC_PIXELS_PER_THREAD; ++i) {
+        const uint pixelIndex = firstPixel + i;
+        if (pixelIndex >= numPixels) {
+            break;
+        }
+        if (pixelIndex >= spanEnd) {
+            // On to the span holding this pixel (spans can be empty)
+            do {
+                ++spanIndex;
+                spanFirstPixel = spanEnd;
+                spanEnd = g_spanPrefixSums[spanIndex + 1u];
+            } while (spanEnd <= pixelIndex);
+            span = g_spanParams[spanIndex];
+            cmdParams = g_commandParams[BitExtract(span.skip_cmdIndex, 16, 16)];
+        }
+        DrawPixel(pixelIndex, spanIndex, span, spanFirstPixel, cmdParams);
     }
 }

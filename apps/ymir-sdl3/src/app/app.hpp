@@ -62,6 +62,9 @@ private:
 
     void RunEmulator();
 
+    /// Adjusts the frame delay (emulator thread) from how long the frame just finished waited for the display.
+    void UpdateFrameDelay(double spareMs);
+
     void StartEmulatorThread();
     void StopEmulatorThread();
     void EmulatorThread();

@@ -1,0 +1,2189 @@
+// Checks the algorithm of the GPU VDP1 path without a GPU.
+//
+// The compute shaders (cs_vdp1_polydraw, cs_vdp1_output_merger, cs_vdp1_erase, cs_vdp1_fbram_write) are ported to C++
+// below and plugged into MetalVDP1 in place of a GPU. The same scene is drawn by the software renderer and the
+// framebuffers are compared. Threads of the polygon drawing shader run in random order, like on a GPU.
+//
+// Usage: vdp1_gpu_emu_test [seed] [scale]
+//
+// With a scale above 1 the scaled up framebuffers (internal resolution) are compared with those of the software renderer.
+//
+// Environment variables:
+//   WARMUP=1        erases and swaps twice before drawing so that the scaled up framebuffers are in line from frame 0
+//   DUMP=1          writes the native and scaled up framebuffers of frame 0 as images (dump_*.ppm)
+//   STATE=<file>    draws the VDP1 command list of a save state instead of the test scene and writes state_*.ppm
+//   STATE_OUT=<file> writes the test scene as a save state
+//   SKIPNATIVE=1    Skip Native Drawing; MESH=1 Transparent Meshes; DEINTERLACE=1 deinterlacing (in both renderers)
+//   INTERLACE=1|2   draws the scene in an interlaced double density mode (2: with VDP1's double interlace drawing)
+//   FULLERASE=1     the erase covers all of the shown framebuffer (otherwise it leaves out the last 7 columns)
+//   with STATE: VDP2=1 renders the picture with the software renderer (sw_vdp2_all.ppm, then each layer alone),
+//   RPDUMP=1 prints rotation parameter table A and its coefficients, BMDUMP=<palette base> writes the 512x256
+//   256-color bitmap at the start of VDP2 VRAM, RPPROBE=<line> prints the rotation parameter A state and screen
+//   coordinates of that line, the bitmap indices and colors they land on and how much of CRAM is filled
+//   with STATE: CRAMSEARCH=<entry> looks for 16 colors of CRAM in work RAM and VRAM, PTRSEARCH=<address> (with
+//   CRAMSEARCH) for a 32-bit value in them, WRAMDUMP=1 (with CRAMSEARCH) writes the work RAM to wramh.bin/wraml.bin
+// The save state options need cereal and the app's serializers on the include path
+// (-I <cereal>/include -I apps/ymir-sdl3/src).
+#include <algorithm>
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <map>
+#include <optional>
+#include <span>
+#include <sstream>
+#include <unordered_map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+// (the scaled up framebuffers of the software renderer are what the GPU's are compared with)
+#define private public
+#include <ymir/hw/vdp/renderer/vdp_renderer_sw.hpp>
+#undef private
+
+#include "ymir/hw/vdp/renderer/metal/metal_vdp1.hpp"
+
+// Replaying the VDP1 command list of a save state (STATE=path) needs cereal and the app's serializers on the include
+// path (-I <cereal>/include -I apps/ymir-sdl3/src)
+#if __has_include(<cereal/cereal.hpp>) && __has_include(<serdes/cereal_savestate.hpp>)
+    #include <cereal/archives/portable_binary.hpp>
+    #include <serdes/cereal_savestate.hpp>
+    #define HAVE_SAVESTATE_REPLAY 1
+#endif
+
+#include <algorithm>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <random>
+#include <vector>
+
+using namespace ymir;
+using namespace ymir::vdp;
+
+namespace ymir::vdp::metal {
+void LogMessage(const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    std::vfprintf(stderr, format, args);
+    std::fputc('\n', stderr);
+    va_end(args);
+}
+} // namespace ymir::vdp::metal
+
+namespace {
+
+uint32 BitExtract(uint32 value, uint32 offset, uint32 length) {
+    return (value >> offset) & ((1u << length) - 1u);
+}
+bool BitTest(uint32 value, uint32 bit) {
+    return ((value >> bit) & 1) != 0;
+}
+uint32 ByteSwap16(uint32 v) {
+    return ((v >> 8) & 0xFF) | ((v << 8) & 0xFF00);
+}
+
+// Port of DivFloor (float division corrected to the exact quotient)
+static int DivFloor(int a, int b) {
+    int q = int(float(a) / float(b));
+    int r = a - q * b;
+    if (r < 0) {
+        --q;
+        r += b;
+        if (r < 0) {
+            --q;
+            r += b;
+        }
+    } else if (r >= b) {
+        ++q;
+        r -= b;
+        if (r >= b) {
+            ++q;
+        }
+    }
+    return q;
+}
+
+struct Color555x {
+    uint32 r, g, b, a;
+};
+Color555x Uint16ToColor555(uint32 raw) {
+    return {BitExtract(raw, 0, 5), BitExtract(raw, 5, 5), BitExtract(raw, 10, 5), BitExtract(raw, 15, 1)};
+}
+uint32 Color555ToUint16(Color555x c) {
+    return c.r | (c.g << 5) | (c.b << 10) | (c.a << 15);
+}
+
+struct TextureStepperH {
+    int num, den, accum, value, inc, baseAccum, baseValue;
+    void Setup(uint32 length, int start, int end, bool hss = false, int hssSelect = 0) {
+        if (hss) {
+            start >>= 1;
+            end >>= 1;
+        }
+        const int delta = end - start;
+        const uint32 absDelta = std::abs(delta);
+        value = start;
+        inc = delta >= 0 ? +1 : -1;
+        if (hss) {
+            value <<= 1;
+            value |= hssSelect;
+            inc <<= 1;
+        }
+        num = absDelta;
+        den = length;
+        if (length <= absDelta) {
+            ++num;
+            accum = absDelta - (length << 1);
+            if (delta >= 0) {
+                ++accum;
+            }
+        } else {
+            --den;
+            accum = length - (length << 1);
+            if (delta < 0) {
+                ++accum;
+            }
+        }
+        num <<= 1;
+        den <<= 1;
+        baseAccum = accum;
+        baseValue = value;
+    }
+    uint32 Value() const {
+        return value;
+    }
+    void SetPixel(uint32 step) {
+        accum = baseAccum + num * step;
+        value = baseValue;
+        if (accum >= 0) {
+            const int count = DivFloor(accum, den) + 1;
+            value += inc * count;
+            accum -= den * count;
+        }
+    }
+};
+
+struct GouraudChannelH {
+    int num, den, accum, value, intInc, fracInc, baseValue, baseAccum;
+    void Setup(uint32 length, int start, int end) {
+        const int delta = end - start;
+        const uint32 absDelta = std::abs(delta);
+        value = start;
+        intInc = 0;
+        fracInc = delta >= 0 ? +1 : -1;
+        num = absDelta;
+        den = length;
+        if (length <= absDelta) {
+            ++num;
+            accum = absDelta - (length << 1);
+            if (delta >= 0) {
+                ++accum;
+            }
+        } else {
+            --den;
+            accum = -int(length);
+            if (delta < 0) {
+                ++accum;
+            }
+        }
+        num <<= 1;
+        den <<= 1;
+        if (den != 0) {
+            if (accum >= 0) {
+                const int count = DivFloor(accum, den) + 1;
+                value += fracInc * count;
+                accum -= den * count;
+            }
+            if (num >= den) {
+                const int count = DivFloor(num, den);
+                intInc += fracInc * count;
+                num -= den * count;
+            }
+        }
+        accum = ~accum;
+        baseValue = value;
+        baseAccum = accum;
+    }
+    void Skip(int steps) {
+        value += intInc * steps;
+        accum -= num * steps;
+        if (den != 0 && accum < 0) {
+            const int count = DivFloor(den - 1 - accum, den);
+            value += fracInc * count;
+            accum += den * count;
+        }
+    }
+    uint32 Blend(int color) const {
+        return std::clamp(value + color - 16, 0, 31);
+    }
+};
+
+struct LineStepperH {
+    int num, den, accum, accumTarget;
+    int majIncX, majIncY, minIncX, minIncY;
+    int posX, posY, startX, startY;
+    uint32 dmaj, step;
+    int aaIncX, aaIncY;
+
+    void Setup(int c1x, int c1y, int c2x, int c2y, bool antiAlias) {
+        posX = c1x;
+        posY = c1y;
+        startX = c1x;
+        startY = c1y;
+        int dx = c2x - c1x, dy = c2y - c1y;
+        int adx = std::abs(dx), ady = std::abs(dy);
+        dmaj = std::max(adx, ady);
+        step = 0;
+        const bool xMajor = adx >= ady;
+        if (xMajor) {
+            majIncX = dx >= 0 ? +1 : -1;
+            majIncY = 0;
+            minIncX = 0;
+            minIncY = dy >= 0 ? +1 : -1;
+        } else {
+            majIncX = 0;
+            majIncY = dy >= 0 ? +1 : -1;
+            minIncX = dx >= 0 ? +1 : -1;
+            minIncY = 0;
+            std::swap(dx, dy);
+            std::swap(adx, ady);
+        }
+        num = ady << 1;
+        den = adx << 1;
+        accum = adx + 1;
+        accumTarget = 0;
+        if (!antiAlias && dx < 0) {
+            ++accumTarget;
+        }
+        accum += num;
+        posX -= majIncX;
+        posY -= majIncY;
+        aaIncX = aaIncY = 0;
+        if (antiAlias) {
+            --accum;
+            --accumTarget;
+            const bool samesign = (c1x > c2x) == (c1y > c2y);
+            if (xMajor) {
+                aaIncX = samesign ? 0 : -majIncX;
+                aaIncY = samesign ? -minIncY : 0;
+            } else {
+                aaIncX = samesign ? 0 : -minIncX;
+                aaIncY = samesign ? -majIncY : 0;
+            }
+        }
+    }
+    void SetStep(uint32 targetStep) {
+        targetStep = std::min(targetStep, dmaj);
+        const int stepDelta = targetStep + 1 - step;
+        if (stepDelta == 0) {
+            return;
+        }
+        step = targetStep + 1;
+        posX += majIncX * stepDelta;
+        posY += majIncY * stepDelta;
+        accum -= num * stepDelta;
+        if (den != 0) {
+            const int count = DivFloor(accumTarget - accum + den, den);
+            accum += den * count;
+            posX += minIncX * count;
+            posY += minIncY * count;
+        }
+    }
+    bool NeedsAA() const {
+        return step > 1 && accum - den + num > accumTarget;
+    }
+};
+
+struct EmuGpu final : metal::Gpu {
+    std::vector<uint8> vram = std::vector<uint8>(kVDP1VRAMSize);
+    std::vector<uint8> fbram = std::vector<uint8>(kVDP1FBRAMSize * 2 * 2 * 2);
+    // (the two scaled up framebuffers at the highest scale, then their transparent mesh framebuffers)
+    std::vector<uint8> fbramHR = std::vector<uint8>(kVDP1FBRAMSize * 64);
+    uint8 *cur = nullptr; // framebuffer memory of the pass being run
+    uint32 hrScale = 1;   // scale of the pass being run
+    std::vector<uint32> spriteOut = std::vector<uint32>(1u << 22);
+    std::vector<uint32> listHeads = std::vector<uint32>(1u << 22, 0xFFFFFFFF);
+    struct Frag {
+        uint32 data, next;
+    };
+    std::vector<Frag> frags = std::vector<Frag>(kMaxVDP1OITFragmentsPerDispatch);
+    std::mt19937 rng{1};
+
+    bool EnableVdp1(std::string &) override {
+        return true;
+    }
+    void Vdp1UploadVRAM(uint32 o, const void *d, uint32 s) override {
+        std::memcpy(&vram[o], d, s);
+    }
+    void Vdp1UploadFBRAM(uint32 o, const void *d, uint32 s) override {
+        std::memcpy(&fbram[o], d, s);
+    }
+    void Vdp1ClearFBRAM(bool hr, uint32 o, uint32 s) override {
+        ++clears;
+        std::memset(&(hr ? fbramHR : fbram)[o], 0, s);
+    }
+    uint32 clears = 0;
+    bool noop = false; // the passes do nothing (BENCH: only the CPU side of MetalVDP1 is timed)
+    void UploadVRAM(uint32, const void *, uint32) override {}
+    void UploadSpriteFB(uint32, const void *, uint32) override {}
+    void RenderLayers(const metal::LayerPassParams &) override {}
+    void Compose(const metal::ComposePassParams &) override {}
+    void ComposeHR(const metal::LayerPassParams &, const metal::ComposePassParams &, uint32, uint32, uint32, uint32,
+                   uint32) override {}
+    metal::FinishedFrame FinishFrame(uint32, uint32, uint32) override {
+        return {};
+    }
+    void SetDisplaySink(std::shared_ptr<MetalDisplaySink>) override {}
+    void Vdp1DebugPixelBuffers(uint32 &, uint32 &, uint32 &, uint32 &) override {}
+    void Vdp1DownloadVRAM(void *dst, uint32 size) override {
+        std::memcpy(dst, vram.data(), size);
+    }
+    void Vdp1DownloadFBRAM(void *dst, uint32 size) override {
+        std::memcpy(dst, fbram.data(), size);
+        ++downloads;
+    }
+    uint32 downloads = 0;
+
+    uint32 FbLoad(uint32 address) const {
+        uint32 v;
+        std::memcpy(&v, &cur[address & ~3u], 4);
+        return v;
+    }
+    void FbStore(uint32 address, uint32 v) {
+        std::memcpy(&cur[address & ~3u], &v, 4);
+    }
+    void Select(bool hr, const void *constants) {
+        VDP1CommonRenderParams common;
+        std::memcpy(&common, constants, sizeof(common));
+        uint32 enh;
+        std::memcpy(&enh, &common.enhancements, 4);
+        hrScale = hr ? BitExtract(enh, 2, 3) + 1 : 1;
+        cur = hr ? fbramHR.data() : fbram.data();
+    }
+
+    bool Vdp1EnableHR(std::string &) override {
+        return true;
+    }
+    void Vdp1DownloadHRFBRAM(void *dst, uint32 size) override {
+        std::memcpy(dst, fbramHR.data(), size);
+    }
+    void Vdp1ResyncHR(const metal::Vdp1ResyncPassParams &p) override {
+        if (noop) {
+            return;
+        }
+        Select(true, p.constants);
+        VDP1CommonRenderParams common;
+        std::memcpy(&common, p.constants, sizeof(common));
+        uint32 dp;
+        std::memcpy(&dp, &common.displayParams, 4);
+        const uint32 drawFB = BitExtract(dp, 7, 1);
+        uint32 enh;
+        std::memcpy(&enh, &common.enhancements, 4);
+        auto upscale = [&](uint32 word, uint32 nx, uint32 ny, uint32 base) {
+            const uint32 raw0 = BitExtract(word, 0, 16), raw1 = BitExtract(word, 16, 16);
+            for (uint32 dy = 0; dy < hrScale; ++dy) {
+                const uint32 rowAddress = base + ((ny * hrScale + dy) * 512 * hrScale + nx * hrScale) * 2;
+                for (uint32 m = 0; m < hrScale; ++m) {
+                    const uint32 lo = (m * 2) < hrScale ? raw0 : raw1;
+                    const uint32 hi = (m * 2 + 1) < hrScale ? raw0 : raw1;
+                    FbStore(rowAddress + m * 4, lo | (hi << 16));
+                }
+            }
+        };
+        for (uint32 id = 0; id < 512 * 256 / 2; ++id) {
+            const uint32 nx = (id * 2) & 511, ny = (id * 2) >> 9;
+            const uint32 base = drawFB * 256 * 1024 * hrScale * hrScale;
+            uint32 word;
+            std::memcpy(&word, &fbram[drawFB * 256 * 1024 + id * 4], 4);
+            upscale(word, nx, ny, base);
+            if (BitTest(enh, 1)) {
+                // (transparent meshes: the native mesh framebuffers are at 1 MB, the scaled up ones follow the two
+                // scaled up framebuffers)
+                std::memcpy(&word, &fbram[512 * 1024 * 2 + drawFB * 256 * 1024 + id * 4], 4);
+                upscale(word, nx, ny, base + 512 * 1024 * hrScale * hrScale);
+            }
+        }
+    }
+
+    // Port of cs_vdp1_hr_downsample
+    void Vdp1DownsampleHR(const metal::Vdp1ResyncPassParams &p) override {
+        if (noop) {
+            return;
+        }
+        Select(true, p.constants);
+        VDP1CommonRenderParams common;
+        std::memcpy(&common, p.constants, sizeof(common));
+        uint32 dp;
+        std::memcpy(&dp, &common.displayParams, 4);
+        const uint32 drawFB = BitExtract(dp, 7, 1);
+        uint32 enh;
+        std::memcpy(&enh, &common.enhancements, 4);
+        auto readHRPixel = [&](uint32 address) {
+            uint32 word;
+            std::memcpy(&word, &fbramHR[address & ~3u], 4);
+            return (address & 2u) != 0 ? BitExtract(word, 16, 16) : BitExtract(word, 0, 16);
+        };
+        for (uint32 id = 0; id < 512 * 256 / 2; ++id) {
+            const uint32 nx = (id * 2) & 511, ny = (id * 2) >> 9;
+            const uint32 rowPixels = 512 * hrScale;
+            const uint32 rowAddress = drawFB * 256 * 1024 * hrScale * hrScale + ny * hrScale * rowPixels * 2;
+            const uint32 raw0 = readHRPixel(rowAddress + nx * hrScale * 2);
+            const uint32 raw1 = readHRPixel(rowAddress + (nx + 1) * hrScale * 2);
+            const uint32 word = raw0 | (raw1 << 16);
+            std::memcpy(&fbram[drawFB * 256 * 1024 + id * 4], &word, 4);
+            if (BitTest(enh, 1)) {
+                const uint32 meshRowAddress = rowAddress + 512 * 1024 * hrScale * hrScale;
+                const uint32 mesh0 = readHRPixel(meshRowAddress + nx * hrScale * 2);
+                const uint32 mesh1 = readHRPixel(meshRowAddress + (nx + 1) * hrScale * 2);
+                const uint32 meshWord = mesh0 | (mesh1 << 16);
+                std::memcpy(&fbram[512 * 1024 * 2 + drawFB * 256 * 1024 + id * 4], &meshWord, 4);
+            }
+        }
+    }
+
+    uint32 ReadVRAM8(uint32 a) const {
+        return vram[a & 0x7FFFF];
+    }
+    uint32 ReadVRAM16(uint32 a) const {
+        a &= 0x7FFFE;
+        return (uint32(vram[a]) << 8) | vram[a + 1];
+    }
+
+    // ---- Erase ----
+    void Vdp1Erase(const metal::Vdp1ErasePassParams &p) override {
+        if (noop) {
+            return;
+        }
+        VDP1CommonRenderParams common;
+        VDP1EraseParams erase;
+        std::memcpy(&common, p.constants, sizeof(common));
+        std::memcpy(&erase, (const uint8 *)p.constants + sizeof(common), sizeof(erase));
+        uint32 dp, ev, coords, vb;
+        std::memcpy(&dp, &common.displayParams, 4);
+        std::memcpy(&coords, &erase.coords, 4);
+        std::memcpy(&ev, &erase.erase, 4);
+        std::memcpy(&vb, &erase.vblank, 4);
+        Select(p.hr, p.constants);
+        uint32 enhancements;
+        std::memcpy(&enhancements, &common.enhancements, 4);
+        const uint32 drawFB = BitExtract(dp, 7, 1);
+        const uint32 drawFBOffset = (drawFB ^ 1) * 256 * 1024 * hrScale * hrScale;
+        const bool vblankErase = BitTest(vb, 0);
+        const uint32 vblankEraseMaxY = BitExtract(vb, 1, 9);
+        const uint32 vblankEraseMaxX = BitExtract(vb, 10, 10);
+        const uint32 addressShift = BitExtract(ev, 16, 1) + 8u;
+        const uint32 eraseScaleV = BitExtract(coords, 31, 1);
+        const uint32 eraseX1 = BitExtract(coords, 0, 6) << 3u;
+        const uint32 eraseY1 = BitExtract(coords, 6, 9) << eraseScaleV;
+        const uint32 eraseX3 = BitExtract(coords, 15, 7) << 3u;
+        const uint32 eraseY3 = BitExtract(coords, 22, 9) << eraseScaleV;
+        for (uint32 idy = 0; idy < 32 * ((p.height + 31) / 32); ++idy) {
+            for (uint32 idx = 0; idx < 32 * ((p.width + 63) / 64); ++idx) {
+                if (hrScale > 1) {
+                    const uint32 hx = idx * 2 + eraseX1 * hrScale, hy = idy + eraseY1 * hrScale;
+                    if (hx >= eraseX3 * hrScale || hy >= (eraseY3 + 1) * hrScale) {
+                        continue;
+                    }
+                    if (vblankErase) {
+                        const uint32 nx = hx / hrScale, ny = hy / hrScale;
+                        if (ny > vblankEraseMaxY || (ny == vblankEraseMaxY && nx > vblankEraseMaxX)) {
+                            continue;
+                        }
+                    }
+                    const uint32 wv = BitExtract(ev, 0, 16);
+                    const uint32 hrAddress = drawFBOffset + (hy * 512u * hrScale + hx) * 2;
+                    FbStore(hrAddress, (wv << 16) | wv);
+                    if (BitTest(enhancements, 1)) {
+                        FbStore(hrAddress + 256 * 1024 * hrScale * hrScale * 2, 0);
+                    }
+                    continue;
+                }
+                const uint32 posx = idx * 2 + eraseX1, posy = idy + eraseY1;
+                if (posx >= eraseX3 + 1 || posy > eraseY3 + 1) {
+                    continue;
+                }
+                bool partialWrite = false;
+                if (vblankErase) {
+                    if (posy > vblankEraseMaxY) {
+                        continue;
+                    }
+                    if (posy == vblankEraseMaxY && posx > vblankEraseMaxX) {
+                        continue;
+                    }
+                    partialWrite = posy == vblankEraseMaxY && posx + 1 > vblankEraseMaxX;
+                }
+                const uint32 address = drawFBOffset + ((posy << addressShift) + posx) * 2;
+                const uint32 writeValue = BitExtract(ev, 0, 16);
+                uint32 value;
+                if (partialWrite) {
+                    value = FbLoad(address);
+                    value &= ~0xFFFFu;
+                    value |= writeValue;
+                } else {
+                    value = (writeValue << 16u) | writeValue;
+                }
+                FbStore(address, value);
+                // (a partial write erases the first pixel of the word only, in every buffer)
+                const uint32 keepMask = partialWrite ? 0xFFFF0000u : 0u;
+                if (BitTest(enhancements, 1)) {
+                    // (transparent meshes: the mesh framebuffers come after the two fields)
+                    FbStore(address + 512 * 1024 * 2, FbLoad(address + 512 * 1024 * 2) & keepMask);
+                }
+                if (BitTest(enhancements, 0) && BitTest(dp, 3)) {
+                    // (deinterlacing: the alternate field is erased too)
+                    FbStore(address + 512 * 1024, (FbLoad(address + 512 * 1024) & keepMask) | (value & ~keepMask));
+                    if (BitTest(enhancements, 1)) {
+                        FbStore(address + 512 * 1024 * 3, FbLoad(address + 512 * 1024 * 3) & keepMask);
+                    }
+                }
+            }
+        }
+    }
+
+    void Vdp1WriteFB(const metal::Vdp1FBWritePassParams &p) override {
+        if (noop) {
+            return;
+        }
+        VDP1CommonRenderParams common;
+        std::memcpy(&common, p.constants, sizeof(common));
+        uint32 dp;
+        std::memcpy(&dp, &common.displayParams, 4);
+        const uint32 drawFBOffset = BitExtract(dp, 7, 1) * 256 * 1024;
+        const VDP1FBRAMWrite *w = (const VDP1FBRAMWrite *)p.writes;
+        if (p.hr) {
+            Select(true, p.constants);
+            const uint32 drawFB = BitExtract(dp, 7, 1);
+            uint32 hrEnh;
+            std::memcpy(&hrEnh, &common.enhancements, 4);
+            for (uint32 id = 0; id < p.count * 2; ++id) {
+                const uint32 index = id >> 1, px = id & 1;
+                const uint32 mask = BitExtract(w[index].andMask, px * 16, 16);
+                if (mask == 0xFFFF) {
+                    continue;
+                }
+                const uint32 nativeAddress = w[index].address + px * 2;
+                uint32 word;
+                std::memcpy(&word, &fbram[drawFB * 256 * 1024 + (nativeAddress & ~3u)], 4);
+                const uint32 raw = BitExtract(word, (nativeAddress & 2) * 8, 16);
+                const uint32 pixelIndex = nativeAddress >> 1;
+                const uint32 nx = pixelIndex & 511, ny = pixelIndex >> 9;
+                if (ny >= 256) {
+                    continue;
+                }
+                for (uint32 dy = 0; dy < hrScale; ++dy) {
+                    for (uint32 dx = 0; dx < hrScale; ++dx) {
+                        const uint32 address = drawFB * 256 * 1024 * hrScale * hrScale +
+                                               ((ny * hrScale + dy) * 512 * hrScale + nx * hrScale + dx) * 2;
+                        const uint32 shift = (address & 2) * 8;
+                        uint32 v = FbLoad(address & ~3u);
+                        v &= ~(0xFFFFu << shift);
+                        v |= raw << shift;
+                        FbStore(address & ~3u, v);
+                        if (BitTest(hrEnh, 1)) {
+                            // (the written bytes are removed from the scaled up mesh framebuffer)
+                            const uint32 meshAddress = (address + 512 * 1024 * hrScale * hrScale) & ~3u;
+                            FbStore(meshAddress, FbLoad(meshAddress) & ~((0xFFFFu & ~mask) << shift));
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        Select(false, p.constants);
+        uint32 enhancements;
+        std::memcpy(&enhancements, &common.enhancements, 4);
+        for (uint32 i = 0; i < p.count; ++i) {
+            const uint32 address = w[i].address + drawFBOffset;
+            uint32 value = FbLoad(address);
+            value &= w[i].andMask;
+            value |= w[i].orMask;
+            FbStore(address, value);
+            if (BitTest(enhancements, 1)) {
+                // (transparent meshes: the written pixels are removed from the mesh framebuffer)
+                FbStore(address + 512 * 1024 * 2, FbLoad(address + 512 * 1024 * 2) & w[i].andMask);
+            }
+            if (BitTest(enhancements, 0) && BitTest(dp, 3)) {
+                // (deinterlacing: the written bytes go to the alternate field too)
+                FbStore(address + 512 * 1024, (FbLoad(address + 512 * 1024) & w[i].andMask) | w[i].orMask);
+                if (BitTest(enhancements, 1)) {
+                    FbStore(address + 512 * 1024 * 3, FbLoad(address + 512 * 1024 * 3) & w[i].andMask);
+                }
+            }
+        }
+    }
+
+    // ---- Polygon drawing ----
+    uint32 numSpans;
+    const VDP1SpanParams *spans;
+    const uint32 *prefix;
+    const uint32 *blockStarts;
+    uint32 tableMismatches = 0;
+    const VDP1CommandParams *cmds;
+    uint32 dpBits;
+    uint32 shading;
+    bool meshMode = false; // transparent mesh variants (POLYSPEC_TRANSPARENT_MESH)
+    uint32 enhBits = 0;    // enhancements of the dispatch's common parameters
+
+    void WriteOutput(int cx, int cy, uint32 cmdIndex, uint32 value, uint32 fragmentSlot) {
+        const VDP1CommandParams &cp = cmds[cmdIndex];
+        uint32 sysClipRaw, uc0, uc1, pmodcolr;
+        std::memcpy(&sysClipRaw, &cp.sysClip, 4);
+        std::memcpy(&uc0, &cp.userClip0, 4);
+        std::memcpy(&uc1, &cp.userClip1, 4);
+        const uint32 cmdpmod = cp.cmdpmod, cmdcolr = cp.cmdcolr;
+        pmodcolr = cmdpmod | (cmdcolr << 16);
+        const uint32 sysX = BitExtract(sysClipRaw, 0, 16), sysY = BitExtract(sysClipRaw, 16, 16);
+        if (cx < 0 || cy < 0 || uint32(cx) > sysX || uint32(cy) > sysY) {
+            return;
+        }
+        if (BitTest(pmodcolr, 10)) {
+            const bool clippingMode = BitTest(pmodcolr, 9);
+            const uint32 u0x = BitExtract(uc0, 0, 16), u0y = BitExtract(uc0, 16, 16);
+            const uint32 u1x = BitExtract(uc1, 0, 16), u1y = BitExtract(uc1, 16, 16);
+            if (((uint32(cx) < u0x || uint32(cy) < u0y || uint32(cx) > u1x || uint32(cy) > u1y)) != clippingMode) {
+                return;
+            }
+        }
+        const bool meshEnable = BitTest(pmodcolr, 8);
+        if (!meshMode && meshEnable && (((cx / int(hrScale)) ^ (cy / int(hrScale))) & 1)) {
+            return;
+        }
+        if (hrScale > 1 && (cx >= int(512 * hrScale) || cy >= int(256 * hrScale))) {
+            return;
+        }
+        const bool doubleDensity = BitTest(dpBits, 3);
+        const bool dblInterlaceEnable = BitTest(dpBits, 4);
+        const uint32 dblInterlaceDrawLine = BitExtract(dpBits, 5, 1);
+        const uint32 fbW = (512u << BitExtract(dpBits, 0, 1)) * hrScale;
+        uint32 fbOffsetFB = BitExtract(dpBits, 7, 1) * 256 * 1024 * hrScale * hrScale;
+        const bool deinterlace = BitTest(enhBits, 0);
+        const uint32 fbH0 = (256u << BitExtract(dpBits, 1, 1)) * hrScale;
+        if (!deinterlace && doubleDensity && dblInterlaceEnable && (uint32(cy) & 1) != dblInterlaceDrawLine) {
+            return;
+        }
+        uint32 outOffset = 0;
+        if (deinterlace && doubleDensity && (uint32(cy) & 1) != 0) {
+            // (odd lines go to the alternate field)
+            if (shading == 3) {
+                fbOffsetFB += 512 * 1024;
+            } else {
+                outOffset += fbW * fbH0;
+            }
+        }
+        if ((deinterlace && doubleDensity) || dblInterlaceEnable) {
+            cy >>= 1;
+        }
+        outOffset += cy * fbW + cx;
+        if (meshMode && meshEnable && shading != 3) {
+            // (the transparent mesh pixels go after the two fields, or after the main ones in the scaled up passes;
+            // MSB On sets the bit in the framebuffer)
+            const uint32 fbH = (256u << BitExtract(dpBits, 1, 1)) * hrScale;
+            outOffset += fbW * fbH * (hrScale > 1 ? 1 : 2);
+        }
+        const bool pixel8Bits = BitTest(dpBits, 2);
+        if (shading == 0) {
+            spriteOut[outOffset] = std::max(spriteOut[outOffset], value);
+        } else if (shading == 1) {
+            spriteOut[outOffset] += 1;
+        } else if (shading == 2) {
+            const uint32 node = fragmentSlot;
+            Frag f;
+            f.data = value;
+            f.next = listHeads[outOffset];
+            listHeads[outOffset] = node;
+            frags[node] = f;
+        } else {
+            if (pixel8Bits) {
+                outOffset &= ~1u;
+            } else {
+                outOffset <<= 1u;
+            }
+            uint32 a = outOffset + fbOffsetFB;
+            uint32 v = ByteSwap16(0x8000) << ((a & 2) * 8);
+            FbStore(a & ~3u, FbLoad(a & ~3u) | v);
+        }
+    }
+    uint32 nextNode = 0;
+
+    void PolyThread(uint32 id) {
+        // GetSpanIndex
+        if (id >= prefix[numSpans]) {
+            return;
+        }
+        uint32 lb = 0, ub = numSpans, spanIndex = 0xFFFFFFFF;
+        while (lb != ub) {
+            const uint32 mid = (lb + ub) >> 1u;
+            const uint32 value = prefix[mid];
+            if (id == value) {
+                spanIndex = mid;
+                break;
+            }
+            if (id > value) {
+                lb = mid + 1u;
+            } else {
+                ub = mid;
+            }
+        }
+        if (spanIndex == 0xFFFFFFFF) {
+            spanIndex = lb - 1u;
+        }
+        // The shader finds the span through the table of the spans of the first pixels of groups of 64
+        {
+            uint32 span = blockStarts[id >> 6];
+            while (prefix[span + 1] <= id) {
+                ++span;
+            }
+            if (span != spanIndex) {
+                std::printf("span table mismatch at pixel %u: %u, search %u\n", id, span, spanIndex);
+                ++tableMismatches;
+            }
+        }
+
+        const VDP1SpanParams &span = spans[spanIndex];
+        const uint32 spanStep = id - prefix[spanIndex] + span.skip;
+        const uint32 cmdIndex = span.cmdIndex;
+        const VDP1CommandParams &cp = cmds[cmdIndex];
+        const uint32 pmodcolr = cp.cmdpmod | (uint32(cp.cmdcolr) << 16);
+        const uint32 cmdsizesrca = cp.cmdsize | (uint32(cp.cmdsrca) << 16);
+        uint32 attrs;
+        std::memcpy(&attrs, &span.attrs, 4);
+        const bool antialias = BitTest(attrs, 0);
+        const bool textured = BitTest(attrs, 1);
+        const uint32 cmdcolr = BitExtract(pmodcolr, 16, 16);
+        const bool pixel8Bits = BitTest(dpBits, 2);
+
+        LineStepperH ls;
+        ls.Setup(span.coord0.x, span.coord0.y, span.coord1.x, span.coord1.y, antialias);
+        ls.SetStep(spanStep);
+
+        uint32 spriteData;
+        if (textured) {
+            const uint32 charSizeH = std::max(BitExtract(cmdsizesrca, 8, 6) << 3, 1u);
+            const bool flipH = BitTest(attrs, 2);
+            const uint32 colorMode = BitExtract(pmodcolr, 3, 3);
+            const bool transparentPixelDisable = BitTest(pmodcolr, 6);
+            const bool endCodesEnabled = !BitTest(pmodcolr, 7);
+            const bool useHighSpeedShrink = BitTest(pmodcolr, 12) && ls.dmaj < charSizeH - 1;
+            const bool evenOddCoordSelect = BitTest(dpBits, 6);
+            int uStart = 0, uEnd = charSizeH - 1;
+            if (flipH) {
+                std::swap(uStart, uEnd);
+            }
+            TextureStepperH us;
+            us.Setup(ls.dmaj + 1, uStart, uEnd, useHighSpeedShrink, evenOddCoordSelect);
+            us.SetPixel(spanStep);
+            uint32 endCodeIndex = 0;
+            bool checkEndCodes;
+            if (endCodesEnabled && !useHighSpeedShrink) {
+                endCodeIndex = BitExtract(attrs, 13, 10);
+                checkEndCodes = endCodeIndex < charSizeH;
+            } else {
+                checkEndCodes = false;
+            }
+            const uint32 texU = us.Value();
+            if (checkEndCodes && (flipH ? (texU <= endCodeIndex) : (texU >= endCodeIndex))) {
+                return;
+            }
+            const uint32 texV = BitExtract(attrs, 3, 10);
+            const uint32 charAddr = BitExtract(cmdsizesrca, 16, 16) << 3u;
+            uint32 color = 0;
+            bool transparent = false, hasEndCode = false;
+            const uint32 charIndex = texU + texV * charSizeH;
+            switch (colorMode) {
+            case 0:
+                color = ReadVRAM8(charAddr + (charIndex >> 1));
+                color = (color >> ((~texU & 1) * 4)) & 0xF;
+                hasEndCode = color == 0xF;
+                transparent = color == 0x0;
+                color |= cmdcolr & 0xFFF0;
+                break;
+            case 1:
+                color = ReadVRAM8(charAddr + (charIndex >> 1));
+                color = (color >> ((~texU & 1) * 4)) & 0xF;
+                hasEndCode = color == 0xF;
+                transparent = color == 0x0;
+                color = ReadVRAM16(color * 2 + cmdcolr * 8);
+                break;
+            case 2:
+                color = ReadVRAM8(charAddr + charIndex);
+                transparent = color == 0x00;
+                hasEndCode = color == 0xFF;
+                color &= 0x3F;
+                color |= cmdcolr & 0xFFC0;
+                break;
+            case 3:
+                color = ReadVRAM8(charAddr + charIndex);
+                transparent = color == 0x00;
+                hasEndCode = color == 0xFF;
+                color &= 0x7F;
+                color |= cmdcolr & 0xFF80;
+                break;
+            case 4:
+                color = ReadVRAM8(charAddr + charIndex);
+                transparent = color == 0x00;
+                hasEndCode = color == 0xFF;
+                color |= cmdcolr & 0xFF00;
+                break;
+            case 5:
+                color = ReadVRAM16((charAddr & ~0xFu) + charIndex * 2);
+                transparent = !BitTest(color, 15);
+                hasEndCode = color == 0x7FFF;
+                break;
+            }
+            spriteData = color;
+            if ((hasEndCode && endCodesEnabled) || (transparent && !transparentPixelDisable)) {
+                return;
+            }
+        } else {
+            spriteData = cmdcolr;
+            if (pixel8Bits) {
+                spriteData &= 0xFFu;
+            }
+        }
+
+        uint32 value = 0;
+        if (shading == 0 || shading == 2) {
+            const uint32 shadingMode = BitExtract(pmodcolr, 0, 2);
+            const bool gouraudEnable = BitTest(pmodcolr, 2);
+            if (!pixel8Bits && (gouraudEnable || shadingMode == 2)) {
+                Color555x src = Uint16ToColor555(spriteData);
+                if (gouraudEnable) {
+                    GouraudChannelH r, g, b;
+                    r.Setup(ls.dmaj + 1, span.gouraud0.r, span.gouraud1.r);
+                    g.Setup(ls.dmaj + 1, span.gouraud0.g, span.gouraud1.g);
+                    b.Setup(ls.dmaj + 1, span.gouraud0.b, span.gouraud1.b);
+                    if (int(spanStep) > 0) {
+                        r.Skip(spanStep);
+                        g.Skip(spanStep);
+                        b.Skip(spanStep);
+                    }
+                    src.r = r.Blend(src.r);
+                    src.g = g.Blend(src.g);
+                    src.b = b.Blend(src.b);
+                }
+                if (shadingMode == 2) {
+                    src.r >>= 1;
+                    src.g >>= 1;
+                    src.b >>= 1;
+                }
+                spriteData = Color555ToUint16(src);
+            }
+            value = spriteData | ((spanIndex + 1u) << 16u);
+        }
+        WriteOutput(ls.posX, ls.posY, cmdIndex, value, id * 2);
+        if (antialias && ls.NeedsAA()) {
+            WriteOutput(ls.posX + ls.aaIncX, ls.posY + ls.aaIncY, cmdIndex, value, id * 2 + 1);
+        }
+    }
+
+    // ---- Output merger ----
+    static Color555x HalfBlendOne(Color555x finalColor, uint32 data) {
+        Color555x fc = Uint16ToColor555(data);
+        if (finalColor.a != 0) {
+            finalColor.r = (finalColor.r + fc.r) >> 1u;
+            finalColor.g = (finalColor.g + fc.g) >> 1u;
+            finalColor.b = (finalColor.b + fc.b) >> 1u;
+            return finalColor;
+        }
+        return fc;
+    }
+    uint32 LatestSeq(uint32 listHead) {
+        uint32 latest = 0;
+        uint32 curr = listHead;
+        for (uint32 visited = 0; curr != 0xFFFFFFFF && visited < 32; ++visited) {
+            latest = std::max(latest, BitExtract(frags[curr].data, 16, 16));
+            curr = frags[curr].next;
+        }
+        return latest;
+    }
+
+    uint32 HalfTransparentBlend(uint32 baseColor, uint32 listHead) {
+        if (listHead == 0xFFFFFFFF) {
+            return baseColor;
+        }
+        Color555x finalColor = Uint16ToColor555(baseColor);
+        if (frags[listHead].next == 0xFFFFFFFF) {
+            return Color555ToUint16(HalfBlendOne(finalColor, frags[listHead].data));
+        }
+        uint32 lastSeq = 0, lastNode = 0;
+        for (uint32 round = 0; round < 32; ++round) {
+            uint32 bestNode = 0xFFFFFFFF, bestSeq = 0, bestData = 0;
+            uint32 curr = listHead;
+            for (uint32 visited = 0; curr != 0xFFFFFFFF && visited < 32; ++visited) {
+                const Frag &frag = frags[curr];
+                const uint32 seq = BitExtract(frag.data, 16, 16);
+                const bool after = seq > lastSeq || (seq == lastSeq && curr > lastNode);
+                const bool better = bestNode == 0xFFFFFFFF || seq < bestSeq || (seq == bestSeq && curr < bestNode);
+                if (after && better) {
+                    bestNode = curr;
+                    bestSeq = seq;
+                    bestData = frag.data;
+                }
+                curr = frag.next;
+            }
+            if (bestNode == 0xFFFFFFFF) {
+                break;
+            }
+            finalColor = HalfBlendOne(finalColor, bestData);
+            lastSeq = bestSeq;
+            lastNode = bestNode;
+        }
+        return Color555ToUint16(finalColor);
+    }
+
+    // Port of cs_vdp1_output_merger (field 0; with the transparent mesh variants the mesh pixels too)
+    void MergeThread(uint32 px, uint32 py, uint32 mode, uint32 field) {
+        const bool pixel8Bits = BitTest(dpBits, 2);
+        const uint32 fbW = (512u << BitExtract(dpBits, 0, 1)) * hrScale;
+        const uint32 fbH = (256u << BitExtract(dpBits, 1, 1)) * hrScale;
+        const uint32 fbramBytes = 256 * 1024 * hrScale * hrScale * 2;
+        // (the field's pixels and framebuffer come after the other field's)
+        const uint32 fbOffset = BitExtract(dpBits, 7, 1) * 256 * 1024 * hrScale * hrScale + field * fbramBytes;
+        const uint32 fieldIn = field * fbW * fbH;
+        const uint32 meshPlane = hrScale > 1 ? 1 : 2;
+        const uint32 inMeshDelta = fbW * fbH * meshPlane;
+        if (pixel8Bits) {
+            if (mode != 0) {
+                return;
+            }
+            const uint32 inx = px * 4, iny = py;
+            const uint32 inOffset = inx + iny * fbW + fieldIn;
+            uint32 out[4], meshOut[4] = {}, seq[4], meshSeq[4] = {};
+            bool has[4];
+            bool any = false;
+            for (int i = 0; i < 4; ++i) {
+                out[i] = spriteOut[inOffset + i];
+                seq[i] = BitExtract(out[i], 16, 16);
+                has[i] = seq[i] != 0;
+                if (meshMode) {
+                    meshOut[i] = spriteOut[inOffset + inMeshDelta + i];
+                    meshSeq[i] = BitExtract(meshOut[i], 16, 16);
+                    has[i] = has[i] || meshSeq[i] != 0;
+                }
+                any |= has[i];
+            }
+            if (!any) {
+                return;
+            }
+            for (int i = 0; i < 4; ++i) {
+                spriteOut[inOffset + i] = 0;
+                if (meshMode) {
+                    spriteOut[inOffset + inMeshDelta + i] = 0;
+                }
+            }
+            const uint32 outOffset = inx + iny * fbW;
+            uint32 v = FbLoad(outOffset + fbOffset);
+            for (int i = 0; i < 4; ++i) {
+                if (seq[i] != 0) {
+                    v &= ~(0xFFu << (i * 8));
+                    v |= BitExtract(out[i], 0, 8) << (i * 8);
+                }
+            }
+            FbStore(outOffset + fbOffset, v);
+            if (meshMode) {
+                const uint32 outMeshOffset = outOffset + fbramBytes * meshPlane;
+                v = FbLoad(outMeshOffset + fbOffset);
+                for (int i = 0; i < 4; ++i) {
+                    if (has[i]) {
+                        v &= ~(0xFFu << (i * 8));
+                        if (meshSeq[i] > seq[i]) {
+                            v |= BitExtract(meshOut[i], 0, 8) << (i * 8);
+                        }
+                    }
+                }
+                FbStore(outMeshOffset + fbOffset, v);
+            }
+            return;
+        }
+        const uint32 inx = px * 2, iny = py;
+        if (mode == 0) {
+            const uint32 inOffset = inx + iny * fbW + fieldIn;
+            const uint32 outOffset = (inx + iny * fbW) * 2;
+            const uint32 o0 = spriteOut[inOffset], o1 = spriteOut[inOffset + 1];
+            const uint32 s0 = BitExtract(o0, 16, 16), s1 = BitExtract(o1, 16, 16);
+            uint32 m0 = 0, m1 = 0, ms0 = 0, ms1 = 0;
+            bool h0 = s0 != 0, h1 = s1 != 0;
+            if (meshMode) {
+                m0 = spriteOut[inOffset + inMeshDelta];
+                m1 = spriteOut[inOffset + inMeshDelta + 1];
+                ms0 = BitExtract(m0, 16, 16);
+                ms1 = BitExtract(m1, 16, 16);
+                h0 = h0 || ms0 != 0;
+                h1 = h1 || ms1 != 0;
+            }
+            if (!h0 && !h1) {
+                return;
+            }
+            spriteOut[inOffset] = 0;
+            spriteOut[inOffset + 1] = 0;
+            if (meshMode) {
+                spriteOut[inOffset + inMeshDelta] = 0;
+                spriteOut[inOffset + inMeshDelta + 1] = 0;
+            }
+            uint32 v = FbLoad(outOffset + fbOffset);
+            if (s0 != 0) {
+                v &= ~0xFFFFu;
+                v |= ByteSwap16(o0);
+            }
+            if (s1 != 0) {
+                v &= ~0xFFFF0000u;
+                v |= ByteSwap16(o1) << 16u;
+            }
+            FbStore(outOffset + fbOffset, v);
+            if (meshMode) {
+                const uint32 outMeshOffset = outOffset + fbramBytes * meshPlane;
+                v = FbLoad(outMeshOffset + fbOffset);
+                if (h0) {
+                    v &= ~0xFFFFu;
+                    if (ms0 > s0) {
+                        v |= ByteSwap16(m0);
+                    }
+                }
+                if (h1) {
+                    v &= ~0xFFFF0000u;
+                    if (ms1 > s1) {
+                        v |= ByteSwap16(m1) << 16u;
+                    }
+                }
+                FbStore(outMeshOffset + fbOffset, v);
+            }
+            return;
+        }
+        const uint32 inOffset = inx + iny * fbW + fieldIn;
+        const uint32 outOffset = (inx + iny * fbW) * 2;
+        const uint32 meshIn = inOffset + inMeshDelta;
+        const uint32 meshAddress = outOffset + fbramBytes * meshPlane + fbOffset;
+        if (mode == 1) {
+            const uint32 c0 = spriteOut[inOffset], c1 = spriteOut[inOffset + 1];
+            const uint32 s0 = std::min(c0, 5u), s1 = std::min(c1, 5u);
+            if (s0 != 0 || s1 != 0) {
+                spriteOut[inOffset] = 0;
+                spriteOut[inOffset + 1] = 0;
+                uint32 v = FbLoad(outOffset + fbOffset);
+                for (uint32 i = 0; i < 2; ++i) {
+                    const uint32 sh = i == 0 ? s0 : s1;
+                    if (sh == 0) {
+                        continue;
+                    }
+                    Color555x c = Uint16ToColor555(ByteSwap16(v >> (i * 16)));
+                    if (c.a != 0) {
+                        c.r >>= sh;
+                        c.g >>= sh;
+                        c.b >>= sh;
+                        v &= ~(0xFFFFu << (i * 16));
+                        v |= ByteSwap16(Color555ToUint16(c)) << (i * 16);
+                    }
+                }
+                FbStore(outOffset + fbOffset, v);
+            }
+            if (!meshMode) {
+                return;
+            }
+            // Port of MergeMesh16 (shadow)
+            const uint32 m0 = spriteOut[meshIn], m1 = spriteOut[meshIn + 1];
+            if (m0 == 0 && m1 == 0 && c0 == 0 && c1 == 0) {
+                return;
+            }
+            spriteOut[meshIn] = 0;
+            spriteOut[meshIn + 1] = 0;
+            const uint32 sprite = FbLoad(outOffset + fbOffset);
+            uint32 mv = FbLoad(meshAddress);
+            for (uint32 i = 0; i < 2; ++i) {
+                const uint32 ms = i == 0 ? m0 : m1, sh = i == 0 ? c0 : c1;
+                if (ms == 0 && sh == 0) {
+                    continue;
+                }
+                uint32 value = 0;
+                if (ms != 0) {
+                    Color555x c = Uint16ToColor555(ByteSwap16(sprite >> (i * 16)));
+                    if (c.a != 0) {
+                        c.r >>= 1;
+                        c.g >>= 1;
+                        c.b >>= 1;
+                    }
+                    value = ByteSwap16(Color555ToUint16(c));
+                }
+                mv &= ~(0xFFFFu << (i * 16));
+                mv |= value << (i * 16);
+            }
+            FbStore(meshAddress, mv);
+            return;
+        }
+        // Half-transparency
+        const uint32 h0 = listHeads[inOffset], h1 = listHeads[inOffset + 1];
+        const uint32 latest0 = meshMode ? LatestSeq(h0) : 0, latest1 = meshMode ? LatestSeq(h1) : 0;
+        if (h0 != 0xFFFFFFFF || h1 != 0xFFFFFFFF) {
+            listHeads[inOffset] = 0xFFFFFFFF;
+            listHeads[inOffset + 1] = 0xFFFFFFFF;
+            uint32 v = FbLoad(outOffset + fbOffset);
+            v = (ByteSwap16(HalfTransparentBlend(ByteSwap16(v >> 16u), h1)) << 16u) |
+                ByteSwap16(HalfTransparentBlend(ByteSwap16(v), h0));
+            FbStore(outOffset + fbOffset, v);
+        }
+        if (!meshMode) {
+            return;
+        }
+        // Port of MergeMesh16 (half-transparency)
+        const uint32 mh[2] = {listHeads[meshIn], listHeads[meshIn + 1]};
+        const uint32 latestSprite[2] = {latest0, latest1};
+        if (mh[0] == 0xFFFFFFFF && mh[1] == 0xFFFFFFFF && latest0 == 0 && latest1 == 0) {
+            return;
+        }
+        listHeads[meshIn] = 0xFFFFFFFF;
+        listHeads[meshIn + 1] = 0xFFFFFFFF;
+        const uint32 sprite = FbLoad(outOffset + fbOffset);
+        uint32 mv = FbLoad(meshAddress);
+        for (uint32 i = 0; i < 2; ++i) {
+            uint32 latestMesh = 0, latestData = 0;
+            uint32 curr = mh[i];
+            for (uint32 visited = 0; curr != 0xFFFFFFFF && visited < 32; ++visited) {
+                const uint32 seq = BitExtract(frags[curr].data, 16, 16);
+                if (seq >= latestMesh) {
+                    latestMesh = seq;
+                    latestData = frags[curr].data;
+                }
+                curr = frags[curr].next;
+            }
+            if (latestMesh == 0 && latestSprite[i] == 0) {
+                continue;
+            }
+            uint32 value = 0;
+            if (latestMesh > latestSprite[i]) {
+                const Color555x sc = Uint16ToColor555(ByteSwap16(sprite >> (i * 16)));
+                value = ByteSwap16(Color555ToUint16(HalfBlendOne(sc, latestData)));
+            }
+            mv &= ~(0xFFFFu << (i * 16));
+            mv |= value << (i * 16);
+        }
+        FbStore(meshAddress, mv);
+    }
+
+    void Vdp1Draw(const metal::Vdp1DrawParams &p) override {
+        if (noop) {
+            return;
+        }
+        if (const char *dir = std::getenv("CAPTURE")) {
+            // Writes the inputs of the polygon drawing dispatch (and the VDP1 VRAM) for running the real shaders on
+            // them elsewhere: a header of 32-bit values, then the blobs in the order of the header's sizes
+            static uint32 captures = 0;
+            const std::string path = std::string(dir) + "/draw_" + std::to_string(captures++) + ".bin";
+            if (FILE *f = std::fopen(path.c_str(), "wb")) {
+                const uint32 header[] = {0x31504456u, p.numPixels, p.shadingMode, p.hr ? 1u : 0u, p.constantsSize,
+                                         p.spansSize, p.prefixSumsSize, p.spanBlockStartsSize, p.commandsSize,
+                                         uint32(vram.size())};
+                std::fwrite(header, sizeof(header), 1, f);
+                std::fwrite(p.constants, 1, p.constantsSize, f);
+                std::fwrite(p.spans, 1, p.spansSize, f);
+                std::fwrite(p.prefixSums, 1, p.prefixSumsSize, f);
+                std::fwrite(p.spanBlockStarts, 1, p.spanBlockStartsSize, f);
+                std::fwrite(p.commands, 1, p.commandsSize, f);
+                std::fwrite(vram.data(), 1, vram.size(), f);
+                std::fclose(f);
+            }
+        }
+        VDP1CommonRenderParams common;
+        std::memcpy(&common, p.constants, sizeof(common));
+        std::memcpy(&dpBits, &common.displayParams, 4);
+        Select(p.hr, p.constants);
+        VDP1PolyDrawParams pd;
+        std::memcpy(&pd, (const uint8 *)p.constants + sizeof(common), sizeof(pd));
+        numSpans = pd.numSpans;
+        spans = (const VDP1SpanParams *)p.spans;
+        prefix = (const uint32 *)p.prefixSums;
+        blockStarts = (const uint32 *)p.spanBlockStarts;
+        if (p.spanBlockStartsSize < ((p.numPixels + 63) / 64) * 4) {
+            std::printf("span table too small: %u bytes for %u pixels\n", p.spanBlockStartsSize, p.numPixels);
+            ++tableMismatches;
+            return;
+        }
+        cmds = (const VDP1CommandParams *)p.commands;
+        shading = p.shadingMode;
+        meshMode = p.transparentMesh;
+        std::memcpy(&enhBits, &common.enhancements, 4);
+        nextNode = 0;
+
+        std::vector<uint32> order(p.numPixels);
+        for (uint32 i = 0; i < p.numPixels; ++i) {
+            order[i] = i;
+        }
+        std::shuffle(order.begin(), order.end(), rng);
+        for (uint32 id : order) {
+            PolyThread(id);
+        }
+        if (shading != 3) {
+            for (uint32 y = 0; y < p.mergeHeight; ++y) {
+                for (uint32 x = 0; x < p.mergeWidth; ++x) {
+                    for (uint32 field = 0; field < p.mergeFields; ++field) {
+                        MergeThread(x + common.mergeOriginX, y + common.mergeOriginY, p.mergeMode, field);
+                    }
+                }
+            }
+        }
+    }
+};
+
+void W16(auto &mem, uint32 addr, uint16 v) {
+    util::WriteBE<uint16>(&mem[addr], v);
+}
+
+} // namespace
+
+int main(int argc, char **argv) {
+    const uint32 seed = argc > 1 ? std::atoi(argv[1]) : 1;
+    const uint32 scale = argc > 2 ? std::atoi(argv[2]) : 1;
+    auto stateSW = std::make_unique<VDPState>();
+    auto stateGPU = std::make_unique<VDPState>();
+    config::VDP2DebugRender dbg;
+    config::VDP2AccessPatternsConfig ap;
+    SoftwareVDPRenderer sw(*stateSW, dbg, ap);
+    sw.EnableThreadedVDP1(false);
+    sw.EnableThreadedVDP2(false);
+    EmuGpu gpu;
+    gpu.rng.seed(seed);
+    MetalVDP1 vdp1(*stateGPU, gpu);
+    {
+        config::Enhancements enh{};
+        enh.internalResolution = scale;
+        // SKIPNATIVE=1: draw VDP1 into the scaled up framebuffers only (Skip Native Drawing) in both renderers
+        const bool skipNative = std::getenv("SKIPNATIVE") != nullptr;
+        // MESH=1: Transparent Meshes in both renderers
+        enh.transparentMeshes = std::getenv("MESH") != nullptr;
+        enh.skipNativeVDP1 = skipNative;
+        // DEINTERLACE=1: deinterlacing in both renderers (with INTERLACE=1 or 2 the scene is in an interlaced double
+        // density mode, with 2 VDP1's double interlace drawing on)
+        enh.deinterlace = std::getenv("DEINTERLACE") != nullptr;
+        sw.ConfigureEnhancements(enh);
+        vdp1.SetDeinterlace(enh.deinterlace);
+        vdp1.SetInternalResolution(scale);
+        vdp1.SetSkipNative(skipNative);
+        vdp1.SetTransparentMeshes(enh.transparentMeshes);
+    }
+
+#ifdef HAVE_SAVESTATE_REPLAY
+    if (const char *statePath = std::getenv("STATE")) {
+        // Draws the VDP1 command list of a save state with both renderers and writes the native and scaled up
+        // framebuffers as images (state_*.ppm) for a look at what the scaled up framebuffer gets wrong
+        auto save = std::make_unique<savestate::SaveState>();
+        {
+            std::ifstream in{statePath, std::ios::binary};
+            if (!in) {
+                std::printf("can't open %s\n", statePath);
+                return 1;
+            }
+            cereal::PortableBinaryInputArchive archive{in};
+            archive(*save);
+        }
+        stateSW->LoadState(save->vdp);
+        stateGPU->LoadState(save->vdp);
+        sw.LoadState(save->vdp.renderer);
+        sw.PostLoadStateSync();
+        static constexpr uint32 kHRes[] = {320, 352, 640, 704};
+        static constexpr uint32 kVRes[] = {224, 240, 256, 256};
+        const uint32 hres = kHRes[stateSW->regs2.TVMD.HRESOn & 3];
+        const uint32 vres = kVRes[stateSW->regs2.TVMD.VRESOn & 3];
+        std::printf("state: TVMD %04X (%ux%u), TVMR %04X FBCR %04X, draw FB %u\n", stateSW->regs2.ReadTVMD(), hres,
+                    vres, stateSW->regs1.ReadTVMR(), stateSW->regs1.ReadFBCR(), stateSW->fbIndex.draw);
+        sw.VDP2SetResolution(hres, vres, false);
+        vdp1.SetVRes(vres);
+        stateSW->state2.UpdateEnabledBGs(stateSW->regs2, dbg);
+        stateGPU->state2.UpdateEnabledBGs(stateGPU->regs2, dbg);
+        for (uint32 addr : {0x0u, 0x2u, 0x6u, 0x8u, 0xAu}) {
+            sw.VDP1WriteReg(addr, 0);
+            vdp1.WriteReg();
+        }
+        if (const char *memSearch = std::getenv("CRAMSEARCH")) {
+            // Looks for the 16 colors at the given CRAM entry in work RAM and VRAM and prints the 128 colors in front
+            // of every match (where a palette that starts 128 entries earlier would have the colors CRAM lacks)
+            const uint32 entry = std::strtoul(memSearch, nullptr, 16);
+            const uint8 *needle = &save->vdp.CRAM[entry * 2];
+            struct Area {
+                const char *name;
+                const uint8 *data;
+                size_t size;
+            };
+            const Area areas[] = {{"WRAM-H", save->system.WRAMHigh.data(), save->system.WRAMHigh.size()},
+                                  {"WRAM-L", save->system.WRAMLow.data(), save->system.WRAMLow.size()},
+                                  {"VDP2 VRAM", save->vdp.VRAM2.data(), save->vdp.VRAM2.size()},
+                                  {"VDP1 VRAM", save->vdp.VRAM1.data(), save->vdp.VRAM1.size()}};
+            for (const Area &area : areas) {
+                for (size_t off = 0; off + 32 <= area.size; off += 2) {
+                    if (std::memcmp(&area.data[off], needle, 32) != 0) {
+                        continue;
+                    }
+                    std::printf("%s offset %06zX matches CRAM %03X\n", area.name, off, entry);
+                    if (off >= 256) {
+                        uint32 nz = 0;
+                        for (uint32 i = 0; i < 128; ++i) {
+                            nz += util::ReadBE<uint16>(&area.data[off - 256 + i * 2]) != 0;
+                        }
+                        std::printf("  the 128 colors in front: %u nonzero, first", nz);
+                        for (uint32 i = 0; i < 8; ++i) {
+                            std::printf(" %04X", util::ReadBE<uint16>(&area.data[off - 256 + i * 2]));
+                        }
+                        std::printf("\n");
+                    }
+                }
+            }
+            if (std::getenv("WRAMDUMP")) {
+                // Writes the work RAM (wramh.bin, wraml.bin) for a closer look at the game's code and data
+                for (const Area &area : areas) {
+                    const std::string name = std::string(area.name) == "WRAM-H"   ? "wramh.bin"
+                                             : std::string(area.name) == "WRAM-L" ? "wraml.bin"
+                                                                                  : "";
+                    if (!name.empty()) {
+                        FILE *f = std::fopen(name.c_str(), "wb");
+                        std::fwrite(area.data, 1, area.size, f);
+                        std::fclose(f);
+                    }
+                }
+            }
+            if (const char *ptr = std::getenv("PTRSEARCH")) {
+                // Looks for a 32-bit value (an address, as code loads it) in work RAM
+                const uint32 value = std::strtoul(ptr, nullptr, 16);
+                for (const Area &area : areas) {
+                    for (size_t off = 0; off + 4 <= area.size; off += 2) {
+                        const uint32 v = util::ReadBE<uint32>(&area.data[off]);
+                        if ((v & 0x0FFFFFFF) == (value & 0x0FFFFFFF)) {
+                            std::printf("%s offset %06zX holds %08X\n", area.name, off, v);
+                        }
+                    }
+                }
+            }
+            return 0;
+        }
+        if (std::getenv("VDP2")) {
+            const auto &r2 = save->vdp.regs2;
+            if (std::getenv("RPDUMP")) {
+                // Rotation parameter table A and the coefficients it points at
+                const uint32 rpta = ((uint32(save->vdp.regs2.RPTAU) << 16 | save->vdp.regs2.RPTAL) & 0x7FF7E) * 2;
+                const uint8 *v = save->vdp.VRAM2.data();
+                auto r32 = [&](uint32 a) { return util::ReadBE<uint32>(&v[a & 0x7FFFF]); };
+                std::printf("rotation parameter table at %05X\n", rpta);
+                static const char *kNames[] = {"Xst", "Yst", "Zst", "dXst", "dYst", "dX", "dY", "A", "B", "C", "D",
+                                               "E", "F", "PxPy", "Pz", "CxCy", "Cz", "Mx", "My", "kx", "ky", "KAst",
+                                               "dKAst", "dKAx"};
+                for (int i = 0; i < 24; ++i) {
+                    std::printf("  %-5s %08X\n", kNames[i], r32(rpta + i * 4));
+                }
+                const uint32 kast = r32(rpta + 21 * 4), dkast = r32(rpta + 22 * 4), dkax = r32(rpta + 23 * 4);
+                const uint32 ktaof = (save->vdp.regs2.KTAOF & 7) << 16;
+                for (uint32 y = 0; y < 240; y += 16) {
+                    const uint32 lineAddr = kast + dkast * y;
+                    std::printf("line %3u: KA %08X ->", y, lineAddr);
+                    for (uint32 x = 0; x < 352; x += 64) {
+                        // coefficient address (in 2-word units): the integer part of the fixed point value
+                        const uint32 ka = ((lineAddr + dkax * x) >> 16) + ktaof;
+                        std::printf(" %08X", r32(ka * 4));
+                    }
+                    std::printf("\n");
+                }
+            }
+            if (std::getenv("BMDUMP")) {
+                // The 512x256 256-color bitmap at the start of VRAM with CRAM mode 1 colors (RGB555, 2048 entries)
+                // plus a map of which pixels are nonzero
+                const uint8 *v = save->vdp.VRAM2.data();
+                const uint8 *c = save->vdp.CRAM.data();
+                const uint32 palBase = std::atoi(std::getenv("BMDUMP"));
+                FILE *f = std::fopen("rbg0_bitmap.ppm", "wb");
+                std::fprintf(f, "P6 512 256 255\n");
+                uint32 nonzero = 0;
+                for (uint32 i = 0; i < 512 * 256; ++i) {
+                    const uint8 idx = v[i];
+                    nonzero += idx != 0;
+                    const uint16 col = util::ReadBE<uint16>(&c[((palBase + idx) & 0x7FF) * 2]);
+                    const uint8 rgb[3] = {uint8((col & 31) << 3), uint8(((col >> 5) & 31) << 3),
+                                          uint8(((col >> 10) & 31) << 3)};
+                    std::fwrite(rgb, 1, 3, f);
+                }
+                std::fclose(f);
+                std::printf("bitmap: %u of %u pixels nonzero\n", nonzero, 512 * 256);
+            }
+            std::printf("VDP2: RAMCTL %04X BGON %04X CHCTLB %04X PLSZ %04X MPOFR %04X RPMD %04X RPRCTL %04X KTCTL %04X "
+                        "KTAOF %04X RPTAU %04X RPTAL %04X PRIR %04X CCCTL %04X SFCCMD %04X LNCLEN %04X\n",
+                        r2.RAMCTL, r2.BGON, r2.CHCTLB, r2.PLSZ, r2.MPOFR, r2.RPMD, r2.RPRCTL, r2.KTCTL, r2.KTAOF,
+                        r2.RPTAU, r2.RPTAL, r2.PRIR, r2.CCCTL, r2.SFCCMD, r2.LNCLEN);
+            // Renders the picture with the software renderer: all layers, then each layer alone (sw_vdp2_*.ppm)
+            static std::vector<uint32> frameOut;
+            static uint32 frameW = 0, frameH = 0;
+            sw.SwCallbacks.FrameComplete = CBSoftwareFrameComplete{
+                nullptr, [](uint32 *fb, uint32 fw, uint32 fh, uint32 fs, void *) {
+                    frameW = fw * fs;
+                    frameH = fh * fs;
+                    frameOut.assign(fb, fb + size_t(frameW) * frameH);
+                }};
+            auto render = [&](const std::string &name, int only) {
+                for (int i = 0; i < 6; ++i) {
+                    dbg.enabledLayers[i] = only < 0 || i == only;
+                }
+                stateSW->state2.UpdateEnabledBGs(stateSW->regs2, dbg);
+                sw.UpdateEnabledLayers();
+                sw.VDP2BeginFrame();
+                for (uint32 y = 0; y < vres; ++y) {
+                    sw.VDP2RenderLine(y);
+                }
+                sw.VDP2EndFrame();
+                FILE *f = std::fopen(name.c_str(), "wb");
+                std::fprintf(f, "P6 %u %u 255\n", frameW, frameH);
+                for (uint32 v : frameOut) {
+                    const uint8 rgb[3] = {uint8(v), uint8(v >> 8), uint8(v >> 16)};
+                    std::fwrite(rgb, 1, 3, f);
+                }
+                std::fclose(f);
+            };
+            if (const char *probe = std::getenv("RPPROBE")) {
+                // Renders down to a line and prints the rotation parameter A state and line output there
+                const uint32 py = std::atoi(probe);
+                sw.VDP2BeginFrame();
+                for (uint32 y = 0; y <= py; ++y) {
+                    sw.VDP2RenderLine(y);
+                }
+                const auto &st = stateSW->state2.rotParamStates[0];
+                const auto &rp = stateSW->regs2.rotParams[0];
+                const auto &lo = sw.m_rotParamLineOutputs[0];
+                std::printf("line %u: Xst %08X Yst %08X KA %08X coeffTable %d dataSize %u mode %u perDot %d "
+                            "coeffAccess %d%d%d%d\n",
+                            py, st.Xst, st.Yst, st.KA, rp.coeffTableEnable, rp.coeffDataSize,
+                            uint32(rp.coeffDataMode), stateSW->regs2.vramControl.perDotRotationCoeffs,
+                            stateSW->state2.coeffAccess[0], stateSW->state2.coeffAccess[1],
+                            stateSW->state2.coeffAccess[2], stateSW->state2.coeffAccess[3]);
+                for (uint32 x = 0; x < 352; x += 32) {
+                    std::printf("  x %3u: (%d, %d)%s\n", x, lo.screenCoords[x].x(), lo.screenCoords[x].y(),
+                                lo.transparent[x] ? " transparent" : "");
+                }
+                const uint8 *v = save->vdp.VRAM2.data();
+                const uint8 *c = save->vdp.CRAM.data();
+                std::printf("BMPNB %04X CRAOFB %04X\n", save->vdp.regs2.BMPNB, save->vdp.regs2.CRAOFB);
+                for (uint32 row = 0; row < 0x800; row += 0x40) {
+                    uint32 nz = 0;
+                    for (uint32 i = 0; i < 0x40; ++i) {
+                        nz += util::ReadBE<uint16>(&c[(row + i) * 2]) != 0;
+                    }
+                    std::printf("  CRAM %03X-%03X: %2u of 64 nonzero, first %04X %04X %04X %04X\n", row, row + 0x3F, nz,
+                                util::ReadBE<uint16>(&c[row * 2]), util::ReadBE<uint16>(&c[row * 2 + 2]),
+                                util::ReadBE<uint16>(&c[row * 2 + 4]), util::ReadBE<uint16>(&c[row * 2 + 6]));
+                }
+                for (uint32 x = 0; x < 352; x += 32) {
+                    const auto [bx, by] = lo.screenCoords[x];
+                    const uint8 idx = v[(uint32(by) & 255) * 512 + (uint32(bx) & 511)];
+                    std::printf("  x %3u: bitmap index %02X, CRAM[%03X] %04X\n", x, idx, 0x400 + idx,
+                                util::ReadBE<uint16>(&c[(0x400 + idx) * 2]));
+                }
+                sw.VDP2EndFrame();
+            }
+            render("sw_vdp2_all.ppm", -1);
+            for (int i = 0; i < 6; ++i) {
+                render("sw_vdp2_layer" + std::to_string(i) + ".ppm", i);
+            }
+            return 0;
+        }
+        vdp1.ResyncFromCPU();
+        if (const char *bench = std::getenv("BENCH")) {
+            // Times the CPU side of MetalVDP1 (preparing the spans) for the command list, drawn BENCH times with
+            // passes that do nothing
+            gpu.noop = true;
+            const int frames = std::max(1, std::atoi(bench));
+            uint64 cmdsPerFrame = 0;
+            (void)vdp1.TakeStats();
+            const auto start = std::chrono::steady_clock::now();
+            for (int frame = 0; frame < frames; ++frame) {
+                vdp1.EraseFramebuffer(0);
+                vdp1.BeginFrame();
+                uint32 addr = 0, retAddr = 0;
+                bool called = false;
+                uint32 cmds = 0;
+                for (; cmds < 20000; ++cmds) {
+                    const VDP1Command::Control ctrl{.u16 = util::ReadBE<uint16>(&stateGPU->mem1.VRAM[addr])};
+                    if (ctrl.end) {
+                        break;
+                    }
+                    if (!ctrl.skip) {
+                        vdp1.ExecuteCommand(addr, ctrl);
+                    }
+                    const uint32 link = uint32(util::ReadBE<uint16>(&stateGPU->mem1.VRAM[addr + 2])) << 3u;
+                    switch (ctrl.jumpMode) {
+                    case VDP1Command::JumpType::Next: addr += 0x20; break;
+                    case VDP1Command::JumpType::Assign: addr = link; break;
+                    case VDP1Command::JumpType::Call:
+                        if (!called) {
+                            retAddr = addr + 0x20;
+                            called = true;
+                        }
+                        addr = link;
+                        break;
+                    case VDP1Command::JumpType::Return:
+                        if (called) {
+                            addr = retAddr;
+                            called = false;
+                        } else {
+                            addr += 0x20;
+                        }
+                        break;
+                    }
+                    addr &= 0x7FFFF;
+                }
+                cmdsPerFrame = cmds;
+                vdp1.FlushWork();
+                vdp1.SwapFramebuffer();
+                stateGPU->fbIndex.Flip();
+            }
+            const double us =
+                std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count() / frames;
+            const MetalVDP1::Stats st = vdp1.TakeStats();
+            std::printf("bench: scale %u%s: %.1f us per frame for %llu commands; per frame %.0f native spans (%.0f "
+                        "pixels), %.0f scaled up spans (%.0f pixels)\n",
+                        scale, std::getenv("SKIPNATIVE") ? " skip native" : "", us,
+                        (unsigned long long)cmdsPerFrame, st.nativeSpans / double(frames),
+                        st.nativePixels / double(frames), st.hrSpans / double(frames), st.hrPixels / double(frames));
+            return 0;
+        }
+        // Two erase + swap cycles so that the scaled up framebuffers are in line, then the frame
+        for (int frame = 0; frame < 3; frame++) {
+            sw.VDP1EraseFramebuffer(0);
+            vdp1.EraseFramebuffer(0);
+            sw.VDP1BeginFrame();
+            vdp1.BeginFrame();
+            uint32 cmds = 0;
+            if (frame == 2) {
+                // Walks the command list like the VDP1: jumps, calls and returns, at most 20000 commands
+                uint32 addr = 0, retAddr = 0;
+                bool called = false;
+                for (; cmds < 20000; ++cmds) {
+                    const VDP1Command::Control ctrl{.u16 = util::ReadBE<uint16>(&stateSW->mem1.VRAM[addr])};
+                    if (ctrl.end) {
+                        break;
+                    }
+                    if (!ctrl.skip) {
+                        sw.VDP1ExecuteCommand(addr, ctrl);
+                        vdp1.ExecuteCommand(addr, ctrl);
+                    }
+                    const uint32 link = uint32(util::ReadBE<uint16>(&stateSW->mem1.VRAM[addr + 2])) << 3u;
+                    switch (ctrl.jumpMode) {
+                    case VDP1Command::JumpType::Next: addr += 0x20; break;
+                    case VDP1Command::JumpType::Assign: addr = link; break;
+                    case VDP1Command::JumpType::Call:
+                        if (!called) {
+                            retAddr = addr + 0x20;
+                            called = true;
+                        }
+                        addr = link;
+                        break;
+                    case VDP1Command::JumpType::Return:
+                        if (called) {
+                            addr = retAddr;
+                            called = false;
+                        } else {
+                            addr += 0x20;
+                        }
+                        break;
+                    }
+                    addr &= 0x7FFFF;
+                }
+            }
+            sw.VDP1EndFrame();
+            vdp1.FlushWork();
+            if (std::getenv("SKIPNATIVE")) {
+                vdp1.SyncFB();
+            }
+            if (frame < 2) {
+                sw.VDP1SwapFramebuffer();
+                vdp1.SwapFramebuffer();
+                stateSW->fbIndex.Flip();
+                stateGPU->fbIndex.Flip();
+                continue;
+            }
+            const uint8 fbi = stateGPU->fbIndex.draw;
+            const uint32 w = hres, h = vres, s = scale;
+            const size_t stride = size_t(512) * s;
+            const uint16 *swHr = sw.m_hrDraw[fbi].data();
+            auto native = [&](const uint8 *fb, uint32 x, uint32 y) {
+                const uint8 *n = &fb[(size_t(y) * 512 + x) * 2];
+                return uint16((uint16(n[0]) << 8) | n[1]);
+            };
+            auto gpuHr = [&](uint32 x, uint32 y) {
+                const uint8 *g = &gpu.fbramHR[fbi * 256 * 1024 * s * s + (size_t(y) * stride + x) * 2];
+                return uint16((uint16(g[0]) << 8) | g[1]);
+            };
+            uint32 nd = 0, hd = 0, holesGpu = 0, holesSw = 0;
+            for (uint32 y = 0; y < h; ++y) {
+                for (uint32 x = 0; x < w; ++x) {
+                    const uint16 sv = native(stateSW->mem1.FBRAM[fbi].data(), x, y);
+                    nd += sv != native(&gpu.fbram[fbi * 256 * 1024], x, y);
+                    if (s > 1 && sv != 0) {
+                        for (uint32 sy = 0; sy < s; ++sy) {
+                            for (uint32 sx = 0; sx < s; ++sx) {
+                                holesGpu += gpuHr(x * s + sx, y * s + sy) == 0;
+                                holesSw += swHr[size_t(y * s + sy) * stride + x * s + sx] == 0;
+                            }
+                        }
+                    }
+                }
+            }
+            if (s > 1) {
+                for (uint32 y = 0; y < h * s; ++y) {
+                    for (uint32 x = 0; x < w * s; ++x) {
+                        hd += gpuHr(x, y) != swHr[size_t(y) * stride + x];
+                    }
+                }
+            }
+            std::printf("%u commands; native: %u pixels differ (GPU vs software)", cmds, nd);
+            if (s > 1) {
+                std::printf("; %ux: %u pixels differ, scaled up pixels left empty where the native pixel is drawn: "
+                            "GPU %u, software %u",
+                            s, hd, holesGpu, holesSw);
+            }
+            std::printf("\n");
+            auto dump = [&](const char *name, uint32 dw, uint32 dh, auto pixelAt) {
+                FILE *f = std::fopen(name, "wb");
+                std::fprintf(f, "P6 %u %u 255\n", dw, dh);
+                for (uint32 y = 0; y < dh; ++y) {
+                    for (uint32 x = 0; x < dw; ++x) {
+                        const uint16 v = pixelAt(x, y);
+                        // RGB pixels as they are, palette pixels as gray levels of their index
+                        const uint8 rgb[3] = {
+                            uint8(v & 0x8000 ? (v & 31) << 3 : v & 0xFF), uint8(v & 0x8000 ? ((v >> 5) & 31) << 3 : v & 0xFF),
+                            uint8(v & 0x8000 ? ((v >> 10) & 31) << 3 : v & 0xFF)};
+                        std::fwrite(rgb, 1, 3, f);
+                    }
+                }
+                std::fclose(f);
+            };
+            dump("state_native.ppm", w * s, h * s,
+                 [&](uint32 x, uint32 y) { return native(stateSW->mem1.FBRAM[fbi].data(), x / s, y / s); });
+            if (s > 1) {
+                dump("state_gpu_hr.ppm", w * s, h * s, gpuHr);
+                dump("state_sw_hr.ppm", w * s, h * s,
+                     [&](uint32 x, uint32 y) { return swHr[size_t(y) * stride + x]; });
+            }
+        }
+        if (std::getenv("VDP2HR")) {
+            // Shows the frame just drawn and renders the picture with the software renderer at the internal
+            // resolution (sw_vdp2_hr.ppm)
+            sw.VDP1SwapFramebuffer();
+            stateSW->fbIndex.Flip();
+            static std::vector<uint32> frameOut;
+            static uint32 frameW = 0, frameH = 0;
+            sw.SwCallbacks.FrameComplete = CBSoftwareFrameComplete{
+                nullptr, [](uint32 *fb, uint32 fw, uint32 fh, uint32 fs, void *) {
+                    frameW = fw * fs;
+                    frameH = fh * fs;
+                    frameOut.assign(fb, fb + size_t(frameW) * frameH);
+                }};
+            sw.VDP2BeginFrame();
+            for (uint32 y = 0; y < vres; ++y) {
+                sw.VDP2RenderLine(y);
+            }
+            sw.VDP2EndFrame();
+            FILE *f = std::fopen("sw_vdp2_hr.ppm", "wb");
+            std::fprintf(f, "P6 %u %u 255\n", frameW, frameH);
+            for (uint32 v : frameOut) {
+                const uint8 rgb[3] = {uint8(v), uint8(v >> 8), uint8(v >> 16)};
+                std::fwrite(rgb, 1, 3, f);
+            }
+            std::fclose(f);
+            std::printf("software renderer picture: %ux%u\n", frameW, frameH);
+        }
+        return 0;
+    }
+#endif
+
+    auto w2 = [&](uint32 addr, uint16 v) {
+        stateSW->regs2.Write(addr, v);
+        stateGPU->regs2.Write(addr, v);
+    };
+    auto w1 = [&](uint32 addr, uint16 v) {
+        stateSW->regs1.Write<false>(addr, v);
+        sw.VDP1WriteReg(addr, v);
+        stateGPU->regs1.Write<false>(addr, v);
+        vdp1.WriteReg();
+    };
+    const char *interlaceEnv = std::getenv("INTERLACE");
+    const uint32 interlace = interlaceEnv ? std::atoi(interlaceEnv) : 0;
+    // (LSMD = 3: double density interlace)
+    w2(0x000, interlace ? 0x80C0 : 0x8000);
+    stateSW->regs2.LatchTVMD();
+    stateGPU->regs2.LatchTVMD();
+    sw.VDP2SetResolution(320, interlace ? 448 : 224, false);
+    vdp1.SetVRes(interlace ? 448 : 224);
+    stateSW->state2.UpdateEnabledBGs(stateSW->regs2, dbg);
+    stateGPU->state2.UpdateEnabledBGs(stateGPU->regs2, dbg);
+
+    w1(0x000, 0x0000);
+    if (interlace == 2) {
+        // FBCR: double interlace drawing (DIE)
+        w1(0x002, 0x0008);
+    }
+    w1(0x006, 0x0000);
+    w1(0x008, 0x0000);
+    // (FULLERASE=1: the erase covers all of the shown framebuffer, as games' usually does)
+    w1(0x00A, (std::getenv("FULLERASE") ? 320 / 8 : 319 / 8) << 9 | 223);
+    stateSW->regs1.LatchEraseParameters();
+    stateGPU->regs1.LatchEraseParameters();
+
+    auto vw16 = [&](uint32 addr, uint16 v) {
+        W16(stateSW->mem1.VRAM, addr, v);
+        W16(stateGPU->mem1.VRAM, addr, v);
+    };
+    // textures: 16bpp RGB gradient 16x16 at 0x20000, 4bpp-lut 16x16 at 0x21000 with table at 0x22000
+    for (int y = 0; y < 16; y++) {
+        for (int x = 0; x < 16; x++) {
+            vw16(0x20000 + (y * 16 + x) * 2, 0x8000 | ((x * 2) << 10) | ((y * 2) << 5) | ((x ^ y) & 31));
+        }
+    }
+    for (int i = 0; i < 16; i++) {
+        vw16(0x22000 + i * 2, i == 0 ? 0 : (0x8000 | (i << 10) | ((15 - i) << 5) | (i * 2)));
+    }
+    for (int i = 0; i < 128; i++) {
+        stateSW->mem1.VRAM[0x21000 + i] = stateGPU->mem1.VRAM[0x21000 + i] = uint8(((i * 3) & 0xF) << 4 | ((i * 5) & 0xF));
+    }
+
+    uint32 cmd = 0;
+    auto put = [&](uint16 ctrl, uint16 link, uint16 pmod, uint16 colr, uint16 srca, uint16 size, sint16 xa, sint16 ya,
+                   sint16 xb, sint16 yb, sint16 xc, sint16 yc, sint16 xd, sint16 yd, uint16 gouraud = 0) {
+        vw16(cmd + 0x00, ctrl);
+        vw16(cmd + 0x02, link);
+        vw16(cmd + 0x04, pmod);
+        vw16(cmd + 0x06, colr);
+        vw16(cmd + 0x08, srca);
+        vw16(cmd + 0x0A, size);
+        vw16(cmd + 0x0C, xa);
+        vw16(cmd + 0x0E, ya);
+        vw16(cmd + 0x10, xb);
+        vw16(cmd + 0x12, yb);
+        vw16(cmd + 0x14, xc);
+        vw16(cmd + 0x16, yc);
+        vw16(cmd + 0x18, xd);
+        vw16(cmd + 0x1A, yd);
+        vw16(cmd + 0x1C, gouraud);
+        cmd += 0x20;
+    };
+    // gouraud table at 0x23000
+    for (int i = 0; i < 4; i++) {
+        vw16(0x23000 + i * 2, (i * 7 + 3) | ((i * 5 + 9) << 5) | ((31 - i * 6) << 10));
+    }
+    // wide texture 144x32 16bpp at 0x24000 with some transparent texels
+    for (int y = 0; y < 32; y++) {
+        for (int x = 0; x < 144; x++) {
+            const bool hole = ((x * 7 + y * 3) % 23) == 0;
+            vw16(0x24000 + (y * 144 + x) * 2, hole ? 0 : (0x8000 | ((x % 32) << 10) | ((y * 3 % 32) << 5) | ((x + y) % 32)));
+        }
+    }
+    put(0x0009, 0, 0, 0, 0, 0, 0, 0, 0, 0, 319, 223, 0, 0);
+    put(0x000A, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    // huge quads reaching far beyond the screen (a ground plane close to the camera), textured and flat, drawn
+    // under everything else
+    // (edges about 2000 pixels long with coordinates within the 11 bits the VDP1 draws at, so beyond 4095 pixels at
+    // 3x and 4x)
+    put(0x0002, 0, 0x0028, 0, 0x20000 >> 3, (2 << 8) | 16, -1000, 150, 1000, 150, 1020, 1000, -1020, 1000);
+    put(0x0004, 0, 0x0000, 0x8210, 0, 0, -1000, -1000, 1000, -1010, 1000, 60, -1000, 40);
+    // opaque base: textured rotated sprites and polygons
+    put(0x0002, 0, 0x0028, 0, 0x20000 >> 3, (2 << 8) | 16, 20, 20, 150, 40, 130, 150, 30, 120);
+    put(0x0004, 0, 0x0000, 0x83E0, 0, 0, 100, 60, 220, 60, 220, 140, 100, 140);
+    put(0x0004, 0, 0x0004, 0x801F, 0, 0, 40, 100, 120, 100, 120, 190, 40, 190, 0x23000 >> 3);
+    // half-transparent textured sprites, overlapping each other and the base, rotated and axis aligned
+    put(0x0002, 0, 0x002B, 0, 0x20000 >> 3, (2 << 8) | 16, 10, 10, 160, 30, 150, 170, 20, 150);
+    put(0x0002, 0, 0x002B, 0, 0x20000 >> 3, (2 << 8) | 16, 90, 50, 250, 80, 240, 200, 100, 170);
+    put(0x0001, 0, 0x002B, 0, 0x20000 >> 3, (2 << 8) | 16, 150, 20, 0, 0, 40, 60, 0, 0);
+    // half-transparent flat polygon + gouraud half-transparent
+    put(0x0004, 0, 0x0003, 0x8000 | (31 << 5), 0, 0, 60, 80, 200, 90, 190, 180, 70, 170);
+    put(0x0004, 0, 0x0007, 0x801F, 0, 0, 120, 30, 280, 60, 260, 120, 130, 100, 0x23000 >> 3);
+    // shadow polygon over everything
+    put(0x0004, 0, 0x0001, 0x8000, 0, 0, 50, 120, 280, 130, 270, 210, 60, 200);
+    // half-luminance sprite, lookup table sprite, msb polygon
+    put(0x0002, 0, 0x002A, 0, 0x20000 >> 3, (2 << 8) | 16, 180, 140, 300, 150, 290, 215, 190, 210);
+    put(0x0002, 0, 0x0009, 0x2200 >> 0, 0x21000 >> 3, (2 << 8) | 16, 10, 150, 90, 160, 80, 215, 20, 205);
+    put(0x0004, 0, 0x8000, 0, 0, 0, 200, 20, 260, 20, 260, 60, 200, 60);
+    // wide sprites partly off screen (clipped at the left and the top), opaque and half-transparent, scaled and not
+    put(0x0002, 0, 0x0028, 0, 0x24000 >> 3, (18 << 8) | 32, -72, 10, 71, 10, 71, 41, -72, 41);
+    put(0x0002, 0, 0x002B, 0, 0x24000 >> 3, (18 << 8) | 32, -72, 20, 71, 20, 71, 51, -72, 51);
+    put(0x0002, 0, 0x002B, 0, 0x24000 >> 3, (18 << 8) | 32, -40, -10, 100, 5, 90, 60, -50, 40);
+    put(0x0002, 0, 0x002B, 0, 0x24000 >> 3, (18 << 8) | 32, 30, 120, 170, 100, 170, 200, 30, 190);
+    put(0x0002, 0x0010, 0x002B, 0, 0x24000 >> 3, (18 << 8) | 32, 200, 100, 300, 100, 300, 130, 200, 130);
+    // shapes one pixel thin in the free strip at the bottom (y 216..223): polygons one pixel tall, one pixel wide and
+    // a single pixel, a sprite one texel tall, a distorted sprite with all vertices on one line, lines and a polyline
+    put(0x0004, 0, 0x0000, 0x83FF, 0, 0, 5, 218, 60, 218, 60, 218, 5, 218);
+    put(0x0004, 0, 0x0000, 0xFC1F, 0, 0, 64, 216, 64, 216, 64, 222, 64, 222);
+    put(0x0004, 0, 0x0000, 0xFFE0, 0, 0, 70, 219, 70, 219, 70, 219, 70, 219);
+    put(0x0000, 0, 0x0028, 0, 0x20000 >> 3, (2 << 8) | 1, 80, 218, 0, 0, 0, 0, 0, 0);
+    put(0x0002, 0, 0x0028, 0, 0x20000 >> 3, (2 << 8) | 16, 100, 220, 160, 220, 160, 220, 100, 220);
+    put(0x0006, 0, 0x0000, 0x801F, 0, 0, 170, 217, 230, 217, 0, 0, 0, 0);
+    put(0x0006, 0, 0x0000, 0x83E0, 0, 0, 233, 216, 233, 223, 0, 0, 0, 0);
+    put(0x0005, 0, 0x0000, 0xFFFF, 0, 0, 240, 217, 260, 217, 260, 222, 240, 222);
+    put(0x0006, 0, 0x0000, 0xFC00, 0, 0, 270, 222, 315, 217, 0, 0, 0, 0);
+    // mesh sprites and polygons over the scene, and a sprite drawn over part of a mesh afterwards (which removes those
+    // mesh pixels with transparent meshes)
+    put(0x0002, 0, 0x0128, 0, 0x20000 >> 3, (2 << 8) | 16, 120, 120, 230, 130, 220, 200, 110, 190);
+    put(0x0004, 0, 0x0100, 0x801F, 0, 0, 20, 30, 140, 40, 120, 110, 30, 90);
+    put(0x0004, 0, 0x0104, 0x83E0, 0, 0, 200, 140, 300, 150, 290, 200, 210, 210, 0x23000 >> 3);
+    put(0x0004, 0, 0x0000, 0x8210, 0, 0, 180, 150, 240, 150, 240, 180, 180, 180);
+    // lines
+    put(0x0006, 0, 0x0003, 0xFFFF, 0, 0, 10, 210, 310, 100, 0, 0, 0, 0);
+    // half-transparent mesh sprite over the line and the meshes
+    put(0x0002, 0, 0x012B, 0, 0x20000 >> 3, (2 << 8) | 16, 150, 110, 260, 115, 255, 160, 145, 150);
+    // shadow mesh polygon over sprites and meshes
+    put(0x0004, 0, 0x0101, 0x8000, 0, 0, 100, 60, 200, 70, 190, 140, 110, 130);
+    put(0x0005, 0, 0x0000, 0x7FFF, 0, 0, 220, 170, 300, 170, 300, 215, 220, 215);
+    put(0x8000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+
+#ifdef HAVE_SAVESTATE_REPLAY
+    if (const char *outPath = std::getenv("STATE_OUT")) {
+        // Writes the scene as a save state (only the VDP part is meaningful) to check the replay with
+        auto save = std::make_unique<savestate::SaveState>();
+        stateSW->SaveState(save->vdp);
+        std::ofstream out{outPath, std::ios::binary};
+        cereal::PortableBinaryOutputArchive archive{out};
+        archive(*save);
+    }
+#endif
+    vdp1.ResyncFromCPU();
+    if (std::getenv("WARMUP")) {
+        // Two erase + swap cycles with nothing drawn so that the scaled up framebuffers are in line when drawing starts
+        for (int i = 0; i < 2; i++) {
+            sw.VDP1EraseFramebuffer(0);
+            vdp1.EraseFramebuffer(0);
+            sw.VDP1SwapFramebuffer();
+            vdp1.SwapFramebuffer();
+            stateSW->fbIndex.Flip();
+            stateGPU->fbIndex.Flip();
+        }
+    }
+    int badFrames = 0;
+    for (int frame = 0; frame < 4; frame++) {
+        if (frame == 2) {
+            // The CPU puts end codes into some rows of the textures drawn before (the GPU path keeps where the rows
+            // end across frames, which has to follow such writes)
+            auto texWrite16 = [&](uint32 addr, uint16 v) {
+                util::WriteBE<uint16>(&stateSW->mem1.VRAM[addr], v);
+                util::WriteBE<uint16>(&stateGPU->mem1.VRAM[addr], v);
+                sw.VDP1WriteVRAM(addr, v);
+                vdp1.WriteVRAM(addr, v, 2);
+            };
+            for (uint32 y : {3u, 9u}) {
+                texWrite16(0x20000 + (y * 16 + 5) * 2, 0x7FFF);
+                texWrite16(0x20000 + (y * 16 + 11) * 2, 0x7FFF);
+            }
+            for (uint32 y : {2u, 7u}) {
+                texWrite16(0x21000 + y * 8 + 2, 0xFFF0);
+            }
+        }
+        // (the erase of the third frame runs out of time)
+        const uint64 eraseCycles = frame == 2 ? 20000 : 0;
+        sw.VDP1EraseFramebuffer(eraseCycles);
+        vdp1.EraseFramebuffer(eraseCycles);
+        sw.VDP1BeginFrame();
+        vdp1.BeginFrame();
+        int cmdNumber = 0;
+        for (uint32 a = 0;; a += 0x20) {
+            VDP1Command::Control ctrl{.u16 = util::ReadBE<uint16>(&stateSW->mem1.VRAM[a])};
+            if (ctrl.end) {
+                break;
+            }
+            if (cmdNumber++ == 9 && frame >= 1) {
+                // The CPU writes to the framebuffer while drawing: a word, then a byte, then a word at an odd pixel
+                const uint8 fb = stateGPU->fbIndex.draw;
+                auto cpuWrite16 = [&](uint32 addr, uint16 v) {
+                    util::WriteBE<uint16>(&stateSW->mem1.FBRAM[fb][addr], v);
+                    util::WriteBE<uint16>(&stateGPU->mem1.FBRAM[fb][addr], v);
+                    sw.VDP1WriteFB(addr, v);
+                    vdp1.WriteFB(addr, 2);
+                };
+                auto cpuWrite8 = [&](uint32 addr, uint8 v) {
+                    stateSW->mem1.FBRAM[fb][addr] = v;
+                    stateGPU->mem1.FBRAM[fb][addr] = v;
+                    sw.VDP1WriteFB(addr, v);
+                    vdp1.WriteFB(addr, 1);
+                };
+                for (uint32 i = 0; i < 40; i++) {
+                    cpuWrite16(((100 + i / 8) * 512 + 60 + i) * 2, uint16(0xFC00 + i * 37));
+                }
+                cpuWrite8(((120) * 512 + 80) * 2 + 1, 0x5A);
+                cpuWrite8(((121) * 512 + 81) * 2, 0xC3);
+                cpuWrite16(((130) * 512 + 99) * 2, 0x8421);
+            }
+            if (!ctrl.skip) {
+                sw.VDP1ExecuteCommand(a, ctrl);
+                vdp1.ExecuteCommand(a, ctrl);
+            }
+        }
+        sw.VDP1EndFrame();
+        vdp1.FlushWork();
+        if (std::getenv("SKIPNATIVE")) {
+            // (the software renderer fills the native framebuffer from the scaled up one when the frame ends, the GPU
+            // path when it's needed: the CPU reading it is one such time)
+            vdp1.SyncFB();
+        }
+        const uint8 fbi = stateGPU->fbIndex.draw;
+        uint32 diffs = 0, minx = ~0u, miny = ~0u, maxx = 0, maxy = 0;
+        for (uint32 y = 0; y < 224; ++y) {
+            for (uint32 x = 0; x < 320; ++x) {
+                const size_t o = (size_t(y) * 512 + x) * 2;
+                const uint8 *g = &gpu.fbram[fbi * 256 * 1024 + o];
+                const uint8 *s = &stateSW->mem1.FBRAM[fbi][o];
+                if (std::memcmp(g, s, 2) != 0) {
+                    if (diffs < 8) {
+                        std::printf("  (%u,%u): GPU %02X%02X sw %02X%02X\n", x, y, g[0], g[1], s[0], s[1]);
+                    }
+                    ++diffs;
+                    minx = std::min(minx, x);
+                    maxx = std::max(maxx, x);
+                    miny = std::min(miny, y);
+                    maxy = std::max(maxy, y);
+                }
+            }
+        }
+        {
+            // The CPU reads the framebuffer, writes to it and reads it again: the copy it reads must match the
+            // software renderer's both times, and the second read needs no download (the CPU copy has its writes)
+            auto readbackDiffs = [&] {
+                uint32 n = 0;
+                for (uint32 y = 0; y < 224; ++y) {
+                    for (uint32 x = 0; x < 320; ++x) {
+                        const size_t o = (size_t(y) * 512 + x) * 2;
+                        n += std::memcmp(&stateGPU->mem1.FBRAM[fbi][o], &stateSW->mem1.FBRAM[fbi][o], 2) != 0;
+                        n += std::memcmp(&gpu.fbram[fbi * 256 * 1024 + o], &stateSW->mem1.FBRAM[fbi][o], 2) != 0;
+                    }
+                }
+                return n;
+            };
+            vdp1.SyncFB();
+            const uint32 before = readbackDiffs();
+            const uint32 downloadsBefore = gpu.downloads;
+            for (uint32 i = 0; i < 16; ++i) {
+                const uint32 addr = ((150 + i) * 512 + 40 + i * 3) * 2;
+                const uint16 v = uint16(0x8000 | (i * 0x0421));
+                util::WriteBE<uint16>(&stateSW->mem1.FBRAM[fbi][addr], v);
+                util::WriteBE<uint16>(&stateGPU->mem1.FBRAM[fbi][addr], v);
+                sw.VDP1WriteFB(addr, v);
+                vdp1.WriteFB(addr, 2);
+            }
+            vdp1.SyncFB();
+            const uint32 after = readbackDiffs();
+            const uint32 extra = gpu.downloads - downloadsBefore;
+            std::printf("  CPU readback: %u differences, %u after CPU writes (%u downloads again)\n", before, after,
+                        extra);
+            if (before || after || (extra && !std::getenv("SKIPNATIVE"))) {
+                ++badFrames;
+            }
+        }
+        uint32 filled = 0;
+        for (uint32 y = 0; y < 224; ++y) {
+            for (uint32 x = 0; x < 320; ++x) {
+                const uint8 *s = &stateSW->mem1.FBRAM[fbi][(size_t(y) * 512 + x) * 2];
+                filled += (s[0] | s[1]) != 0;
+            }
+        }
+        if (std::getenv("DEINTERLACE") && interlace) {
+            // The alternate field of the draw framebuffer
+            uint32 altDiffs = 0, altFilled = 0;
+            const SpriteFB &swAlt = sw.m_altFBRAM[fbi];
+            for (uint32 y = 0; y < 224; ++y) {
+                for (uint32 x = 0; x < 320; ++x) {
+                    const size_t o = (size_t(y) * 512 + x) * 2;
+                    const uint8 *g = &gpu.fbram[256 * 1024 * 2 + fbi * 256 * 1024 + o];
+                    altFilled += (swAlt[o] | swAlt[o + 1]) != 0;
+                    if (std::memcmp(g, &swAlt[o], 2) != 0) {
+                        if (altDiffs < 8) {
+                            std::printf("  alt (%u,%u): GPU %02X%02X sw %02X%02X\n", x, y, g[0], g[1], swAlt[o],
+                                        swAlt[o + 1]);
+                        }
+                        ++altDiffs;
+                    }
+                }
+            }
+            std::printf("  alternate field (%u pixels drawn): %u pixels differ\n", altFilled, altDiffs);
+            if (altDiffs) {
+                ++badFrames;
+            }
+        }
+        if (std::getenv("MESH")) {
+            // The transparent mesh framebuffer of the draw framebuffer
+            uint32 meshDiffs = 0, meshFilled = 0;
+            for (uint32 y = 0; y < 224; ++y) {
+                for (uint32 x = 0; x < 320; ++x) {
+                    const size_t o = (size_t(y) * 512 + x) * 2;
+                    const uint8 *g = &gpu.fbram[256 * 1024 * 4 + fbi * 256 * 1024 + o];
+                    const uint8 *m = &sw.m_meshFBRAM[0][fbi][o];
+                    meshFilled += (m[0] | m[1]) != 0;
+                    if (std::memcmp(g, m, 2) != 0) {
+                        if (meshDiffs < (std::getenv("MESHALL") ? 100000u : 8u)) {
+                            std::printf("  mesh (%u,%u): GPU %02X%02X sw %02X%02X\n", x, y, g[0], g[1], m[0], m[1]);
+                        }
+                        ++meshDiffs;
+                    }
+                }
+            }
+            std::printf("  mesh framebuffer (%u pixels drawn): %u pixels differ\n", meshFilled, meshDiffs);
+            if (meshDiffs) {
+                ++badFrames;
+            }
+        }
+        std::printf("frame %d (FB %u, %u pixels drawn): %u pixels differ", frame, fbi, filled, diffs);
+        if (diffs) {
+            std::printf(" in x %u..%u y %u..%u", minx, maxx, miny, maxy);
+            ++badFrames;
+        }
+        std::printf("\n");
+        if (scale > 1) {
+            // The scaled up framebuffer of the draw framebuffer
+            const uint16 *swHr = sw.m_hrDraw[fbi].data();
+            const size_t stride = size_t(512) * scale;
+            uint32 hdiffs = 0, hfilled = 0, hminx = ~0u, hminy = ~0u, hmaxx = 0, hmaxy = 0;
+            for (uint32 y = 0; y < 224 * scale; ++y) {
+                for (uint32 x = 0; x < 320 * scale; ++x) {
+                    const uint8 *g = &gpu.fbramHR[fbi * 256 * 1024 * scale * scale + (size_t(y) * stride + x) * 2];
+                    const uint16 gv = (uint16(g[0]) << 8) | g[1];
+                    const uint16 sv = swHr[size_t(y) * stride + x];
+                    hfilled += sv != 0;
+                    if (gv != sv) {
+                        if (hdiffs < 8) {
+                            std::printf("  hr (%u,%u): GPU %04X sw %04X\n", x, y, gv, sv);
+                        }
+                        ++hdiffs;
+                        hminx = std::min(hminx, x);
+                        hmaxx = std::max(hmaxx, x);
+                        hminy = std::min(hminy, y);
+                        hmaxy = std::max(hmaxy, y);
+                    }
+                }
+            }
+            // Every line where the scaled up framebuffer is not the native one scaled up has to be one the renderer
+            // reports as changed (VDP2 only composes those again); not in interlaced modes, which aren't drawn scaled up
+            if (!interlace) {
+                uint32 first = 0, last = 0;
+                const bool any = vdp1.HRDirtyLines(fbi, first, last);
+                uint32 outside = 0;
+                for (uint32 y = 0; y < 224 * scale; ++y) {
+                    for (uint32 x = 0; x < 320 * scale; ++x) {
+                        const uint8 *g = &gpu.fbramHR[fbi * 256 * 1024 * scale * scale + (size_t(y) * stride + x) * 2];
+                        const uint8 *n = &gpu.fbram[fbi * 256 * 1024 + (size_t(y / scale) * 512 + x / scale) * 2];
+                        if (std::memcmp(g, n, 2) != 0 && !(any && y / scale >= first && y / scale <= last)) {
+                            ++outside;
+                        }
+                    }
+                }
+                if (outside) {
+                    std::printf("  %u pixels differ from the native ones scaled up outside the reported lines\n", outside);
+                    ++badFrames;
+                }
+            }
+            // Shapes one native pixel thin cover all of their native pixels' scaled up pixels (checked on the axis
+            // aligned ones in the bottom strip; not in interlaced modes)
+            if (!interlace) {
+                uint32 holes = 0;
+                for (uint32 y = 216; y < 224; ++y) {
+                    for (uint32 x = 0; x < 265; ++x) {
+                        const uint8 *n = &gpu.fbram[fbi * 256 * 1024 + (size_t(y) * 512 + x) * 2];
+                        if ((n[0] | n[1]) == 0) {
+                            continue;
+                        }
+                        for (uint32 sy = 0; sy < scale; ++sy) {
+                            for (uint32 sx = 0; sx < scale; ++sx) {
+                                const uint8 *g = &gpu.fbramHR[fbi * 256 * 1024 * scale * scale +
+                                                              (size_t(y * scale + sy) * stride + x * scale + sx) * 2];
+                                holes += (g[0] | g[1]) == 0;
+                            }
+                        }
+                    }
+                }
+                if (holes) {
+                    std::printf("  %u scaled up pixels of thin shapes are not drawn\n", holes);
+                    ++badFrames;
+                }
+            }
+            if (std::getenv("DUMP") && frame == 0) {
+                // Writes the native (scaled up by repetition), GPU and software scaled up framebuffers as PPM images
+                auto dump = [&](const char *name, auto pixelAt) {
+                    FILE *f = std::fopen(name, "wb");
+                    std::fprintf(f, "P6 %u %u 255\n", 320 * scale, 224 * scale);
+                    for (uint32 y = 0; y < 224 * scale; ++y) {
+                        for (uint32 x = 0; x < 320 * scale; ++x) {
+                            const uint16 v = pixelAt(x, y);
+                            const uint8 rgb[3] = {uint8((v & 31) << 3), uint8(((v >> 5) & 31) << 3),
+                                                  uint8(((v >> 10) & 31) << 3)};
+                            std::fwrite(rgb, 1, 3, f);
+                        }
+                    }
+                    std::fclose(f);
+                };
+                dump("dump_native.ppm", [&](uint32 x, uint32 y) {
+                    const uint8 *n = &stateSW->mem1.FBRAM[fbi][(size_t(y / scale) * 512 + x / scale) * 2];
+                    return uint16((uint16(n[0]) << 8) | n[1]);
+                });
+                dump("dump_gpu_native.ppm", [&](uint32 x, uint32 y) {
+                    const uint8 *n = &gpu.fbram[fbi * 256 * 1024 + (size_t(y / scale) * 512 + x / scale) * 2];
+                    return uint16((uint16(n[0]) << 8) | n[1]);
+                });
+                dump("dump_gpu_hr.ppm", [&](uint32 x, uint32 y) {
+                    const uint8 *g = &gpu.fbramHR[fbi * 256 * 1024 * scale * scale + (size_t(y) * stride + x) * 2];
+                    return uint16((uint16(g[0]) << 8) | g[1]);
+                });
+                dump("dump_sw_hr.ppm", [&](uint32 x, uint32 y) { return swHr[size_t(y) * stride + x]; });
+            }
+            std::printf("  scaled up %ux (%u pixels drawn): %u pixels differ", scale, hfilled, hdiffs);
+            if (hdiffs) {
+                std::printf(" in x %u..%u y %u..%u", hminx, hmaxx, hminy, hmaxy);
+                ++badFrames;
+            }
+            std::printf("\n");
+            if (std::getenv("MESH") && !interlace) {
+                // The scaled up transparent mesh framebuffer (after the two scaled up framebuffers), and the lines
+                // where it isn't the native one scaled up have to be reported as changed too
+                const uint16 *swMesh = sw.m_hrMesh[fbi].data();
+                const size_t meshBase = size_t(256) * 1024 * scale * scale * 2;
+                uint32 first = 0, last = 0;
+                const bool any = vdp1.HRDirtyLines(fbi, first, last);
+                uint32 mdiffs = 0, mfilled = 0, outside = 0;
+                for (uint32 y = 0; y < 224 * scale; ++y) {
+                    for (uint32 x = 0; x < 320 * scale; ++x) {
+                        const uint8 *g =
+                            &gpu.fbramHR[meshBase + fbi * 256 * 1024 * scale * scale + (size_t(y) * stride + x) * 2];
+                        const uint16 gv = (uint16(g[0]) << 8) | g[1];
+                        const uint16 sv = swMesh[size_t(y) * stride + x];
+                        mfilled += sv != 0;
+                        if (gv != sv) {
+                            if (mdiffs < 8) {
+                                std::printf("  hr mesh (%u,%u): GPU %04X sw %04X\n", x, y, gv, sv);
+                            }
+                            ++mdiffs;
+                        }
+                        const uint8 *n = &gpu.fbram[512 * 1024 * 2 + fbi * 256 * 1024 +
+                                                    (size_t(y / scale) * 512 + x / scale) * 2];
+                        if (std::memcmp(g, n, 2) != 0 && !(any && y / scale >= first && y / scale <= last)) {
+                            ++outside;
+                        }
+                    }
+                }
+                std::printf("  scaled up mesh framebuffer (%u pixels drawn): %u pixels differ\n", mfilled, mdiffs);
+                if (outside) {
+                    std::printf("  %u mesh pixels differ from the native ones scaled up outside the reported lines\n",
+                                outside);
+                }
+                if (mdiffs || outside) {
+                    ++badFrames;
+                }
+            }
+        }
+        sw.VDP1SwapFramebuffer();
+        vdp1.SwapFramebuffer();
+        stateSW->fbIndex.Flip();
+        stateGPU->fbIndex.Flip();
+    }
+    if (gpu.tableMismatches) {
+        std::printf("%u span table mismatches\n", gpu.tableMismatches);
+        ++badFrames;
+    }
+    if (std::getenv("MESH")) {
+        // (the mesh framebuffers are cleared when a mesh sprite is drawn into a framebuffer whose shown part was
+        // erased since its last one)
+        std::printf("mesh framebuffer clears: %u\n", gpu.clears);
+    }
+    return badFrames;
+}

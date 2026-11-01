@@ -432,6 +432,7 @@ function(_shader_make_compile_spirv_command)
     # Parse arguments
     set(options
         INCLUDE_REFLECTION
+        VK_DX_LAYOUT
     )
     set(oneValueArgs
         OUT_COMMAND
@@ -456,6 +457,15 @@ function(_shader_make_compile_spirv_command)
         endif ()
         if (ARG_INCLUDE_REFLECTION)
             list(APPEND _compile_flags "-fspv-reflect")
+        endif ()
+        if (ARG_VK_DX_LAYOUT)
+            # Lay out constant and structured buffers the way Direct3D does, so that the same C++ structures can be
+            # used with every graphics API
+            list(APPEND _compile_flags "-fvk-use-dx-layout")
+            # Direct3D keeps read-only (t) and read-write (u) registers apart, but they all end up in the same set of
+            # bindings in SPIR-V, where a shader with t1 and u1 would get both on binding 1 and SPIRV-Cross would
+            # alias them to the same buffer. Move the read-write ones out of the way.
+            list(APPEND _compile_flags -fvk-u-shift 16 0)
         endif ()
 
         set(${ARG_OUT_COMMAND}
@@ -499,6 +509,16 @@ function(_shader_make_compile_metal_command)
     cmake_parse_arguments(ARG "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
 
     if (APPLE AND SPIRV_CROSS_EXECUTABLE AND METAL_EXECUTABLE AND METALLIB_EXECUTABLE)
+        # The Metal compiler needs the iOS SDK to build shaders for iOS; invoking it through xcrun selects it
+        set(_metal_command "${METAL_EXECUTABLE}")
+        set(_metallib_command "${METALLIB_EXECUTABLE}")
+        set(_spirv_cross_platform_flags "")
+        if (IOS AND XCRUN_EXECUTABLE)
+            set(_metal_command "${XCRUN_EXECUTABLE}" -sdk iphoneos metal)
+            set(_metallib_command "${XCRUN_EXECUTABLE}" -sdk iphoneos metallib)
+            set(_spirv_cross_platform_flags --msl-ios)
+        endif ()
+
         set(_metal_compile_flags "")
         if (CMAKE_BUILD_TYPE STREQUAL "Debug")
             list(APPEND _metal_compile_flags "-gline-tables-only" "-MO")
@@ -511,12 +531,13 @@ function(_shader_make_compile_metal_command)
                 "${ARG_SPIRV_SOURCE}"
                 --msl
                 --msl-version 20200  # for 64-bit integers
+                ${_spirv_cross_platform_flags}
                 --output "${ARG_METAL_DESTINATION}"
-            COMMAND "${METAL_EXECUTABLE}"
+            COMMAND ${_metal_command}
                 ${_metal_compile_flags}
                 -c "${ARG_METAL_DESTINATION}"
                 -o "${ARG_AIR_DESTINATION}"
-            COMMAND "${METALLIB_EXECUTABLE}"
+            COMMAND ${_metallib_command}
                 "${ARG_AIR_DESTINATION}"
                 -o "${ARG_METALLIB_DESTINATION}"
             PARENT_SCOPE
@@ -597,12 +618,17 @@ endfunction()
 #   INCLUDE_REFLECTION (optional)
 #       If specified, shaders are compiled with reflection information.
 #
+#   VK_DX_LAYOUT (optional)
+#       If specified, SPIR-V (and therefore Metal) shaders use the Direct3D memory layout for constant and structured
+#       buffers (-fvk-use-dx-layout).
+#
 # Output:
 #   OUT_PATHS is set to a list of full paths of the generated .cso/.spv files.
 function(compile_shader)
     # Parse arguments
     set(options
         INCLUDE_REFLECTION
+        VK_DX_LAYOUT
     )
     set(oneValueArgs
         OUT_PATHS
@@ -700,6 +726,7 @@ function(compile_shader)
         INCLUDE_PATHS ${ARG_INCLUDE_PATHS}
         MACROS ${ARG_MACROS}
         ${_fwd_INCLUDE_REFLECTION}
+        ${_fwd_VK_DX_LAYOUT}
     )
     if (_spirv_compile_command)
         list(APPEND _compile_commands ${_spirv_compile_command})
