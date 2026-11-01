@@ -423,23 +423,32 @@ struct CHDConversionSettingsView: View {
                             VStack(alignment: .leading, spacing: 2) {
                                 Text(game.title)
                                     .lineLimit(2)
+                                    .fixedSize(horizontal: false, vertical: true)
                                 Text(game.subtitle)
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
+                                    .lineLimit(1)
                             }
-                            Spacer(minLength: 8)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                             if converter.isQueued(game) {
                                 Text(converter.current?.id == game.id ? "Working…" : "Waiting")
                                     .font(.footnote)
                                     .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .fixedSize()
                             } else {
-                                Button("Convert") {
+                                Button {
                                     converter.enqueue([game])
+                                } label: {
+                                    Text("Convert")
+                                        .lineLimit(1)
+                                        .fixedSize()
                                 }
                                 .ymirSecondaryButton()
                                 .controlSize(.small)
                             }
                         }
+                        .padding(.vertical, 2)
                     }
                     Button {
                         converter.enqueue(candidates)
