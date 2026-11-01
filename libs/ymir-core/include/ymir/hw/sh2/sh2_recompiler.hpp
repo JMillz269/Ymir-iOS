@@ -21,6 +21,9 @@ and interrupts), and are validated against the code memory every time they are e
 #include <atomic>
 #include <functional>
 #include <cstdlib>
+#ifdef _WIN32
+#include <malloc.h>
+#endif
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -193,7 +196,11 @@ private:
 
     struct BlockTableDeleter {
         void operator()(Block *p) const {
+#ifdef _WIN32
+            _aligned_free(p); // (MSVC's runtime has no std::aligned_alloc)
+#else
             std::free(p);
+#endif
         }
     };
 

@@ -159,7 +159,11 @@ SH2Recompiler::SH2Recompiler(SH2 &sh2, sys::SH2Bus &bus)
     m_chunkSize = g_chunkSize;
     {
         const size_t bytes = (sizeof(Block) * kBlockTableSize + 4095) & ~size_t{4095};
+#ifdef _WIN32
+        Block *table = static_cast<Block *>(_aligned_malloc(bytes, 4096));
+#else
         Block *table = static_cast<Block *>(std::aligned_alloc(4096, bytes));
+#endif
         if (table == nullptr) {
             std::lock_guard lock{g_poolMutex};
             g_freeChunks.push_back(m_chunkOffset);
