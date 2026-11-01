@@ -1112,6 +1112,20 @@ struct AppearanceSettingsView: View {
             }
 
             GlassSection(content: {
+                Picker("Theme", selection: $theme.appearanceMode) {
+                    ForEach(AppearanceMode.allCases) { mode in
+                        Text(mode.label).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+            }, header: {
+                Text("Theme")
+            }, footer: {
+                WrappedText("Automatic follows the iOS setting for light or dark. Light and Dark always use that look, whatever iOS is set to.")
+            })
+
+            GlassSection(content: {
                 PhotosPicker(selection: $photoItem, matching: .images) {
                     HStack {
                         Text(theme.backgroundImage == nil ? "Choose Photo…" : "Change Photo…")

@@ -274,6 +274,29 @@ struct GlassPicker<SelectionValue: Hashable, Content: View>: View {
 
 // MARK: - Backdrop
 
+/// Whether the app follows the iOS light or dark appearance, or always uses one of them.
+enum AppearanceMode: Int, CaseIterable, Identifiable {
+    case system, light, dark
+
+    var id: Int { rawValue }
+
+    var label: String {
+        switch self {
+        case .system: return "Automatic"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+
+    var interfaceStyle: UIUserInterfaceStyle {
+        switch self {
+        case .system: return .unspecified
+        case .light: return .light
+        case .dark: return .dark
+        }
+    }
+}
+
 /// A soft, colourful ambient background that gives glass something to refract.
 /// The colours of the backdrop, kept between launches. The player picks how many are used and which they are
 /// (Settings > Appearance); the positions of the blobs are fixed.
@@ -307,12 +330,18 @@ final class BackdropTheme: ObservableObject {
     private static let colorsKey = "theme.backdropColors"
     private static let intensityKey = "theme.backdropIntensity"
     private static let blurKey = "theme.backgroundBlur"
+    private static let modeKey = "theme.appearanceMode"
     private static let blurAmountKey = "theme.backgroundBlurAmount"
 
     /// Where the player's own background picture is kept (not in the Files-visible Documents folder).
     private static var imageURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("background.jpg")
+    }
+
+    /// Follow the iOS appearance (light or dark), or always use light or dark.
+    @Published var appearanceMode: AppearanceMode {
+        didSet { UserDefaults.standard.set(appearanceMode.rawValue, forKey: Self.modeKey) }
     }
 
     /// The player's own picture for the background, or nil to paint it with the colours.
@@ -356,6 +385,7 @@ final class BackdropTheme: ObservableObject {
         colorCount = min(max(count, Self.minColors), Self.maxColors)
         let strength = defaults.object(forKey: Self.intensityKey) as? Double ?? 1.0
         intensity = min(max(strength, 0.0), 1.5)
+        appearanceMode = AppearanceMode(rawValue: defaults.integer(forKey: Self.modeKey)) ?? .system
         blurBackground = defaults.object(forKey: Self.blurKey) as? Bool ?? true
         blurAmount = min(max(defaults.object(forKey: Self.blurAmountKey) as? Double ?? 20, 4), 40)
         backgroundImage = UIImage(contentsOfFile: Self.imageURL.path)

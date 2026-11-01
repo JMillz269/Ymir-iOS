@@ -1,11 +1,21 @@
+import Combine
 import SwiftUI
 import UIKit
 
 /// Hosting controller used for all native screens. Reports when it was dismissed, including by swiping a sheet down.
 final class ShellHostingController<Content: View>: UIHostingController<Content> {
     var onDismissed: (() -> Void)?
+    private var appearanceObserver: AnyCancellable?
 
     override var prefersStatusBarHidden: Bool { false }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        // Light, dark or the iOS setting, as picked in Settings > Appearance; it applies to what this screen presents too.
+        appearanceObserver = BackdropTheme.shared.$appearanceMode.sink { [weak self] mode in
+            self?.overrideUserInterfaceStyle = mode.interfaceStyle
+        }
+    }
 
     override func viewDidDisappear(_ animated: Bool) {
         super.viewDidDisappear(animated)
