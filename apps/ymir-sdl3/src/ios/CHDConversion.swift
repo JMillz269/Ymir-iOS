@@ -484,6 +484,11 @@ struct CHDConversionSettingsView: View {
                         Text(sizeText(originalsBytes))
                             .foregroundStyle(.secondary)
                     }
+                    Button {
+                        FilesApp.open(AppPaths.originals)
+                    } label: {
+                        Label("Show Originals in Files", systemImage: "folder")
+                    }
                     Button(role: .destructive) {
                         confirmDeleteOriginals = true
                     } label: {

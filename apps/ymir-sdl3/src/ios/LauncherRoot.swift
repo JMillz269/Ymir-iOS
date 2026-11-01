@@ -629,8 +629,12 @@ private struct EmptyLibraryView: View {
 enum FilesApp {
     /// Opens the Files app at this app's Documents folder.
     static func openDocuments() {
-        let path = AppPaths.documents.path
-        if let url = URL(string: "shareddocuments://" + path) {
+        open(AppPaths.documents)
+    }
+
+    /// Opens the Files app at a folder of this app.
+    static func open(_ folder: URL) {
+        if let url = URL(string: "shareddocuments://" + folder.path) {
             UIApplication.shared.open(url)
         }
     }
