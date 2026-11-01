@@ -181,19 +181,15 @@ struct GamesView: View {
                 TextField("Name", text: $renameText)
                 Button("Save") {
                     if let game = renameTarget {
-                        library.rename(game, to: renameText)
+                        if let problem = library.renameFiles(of: game, to: renameText) {
+                            alert = AlertInfo(title: "Couldn't Rename", message: problem)
+                        }
                     }
                     renameTarget = nil
                 }
-                if let game = renameTarget, game.customName != nil {
-                    Button("Use File Name") {
-                        library.rename(game, to: nil)
-                        renameTarget = nil
-                    }
-                }
                 Button("Cancel", role: .cancel) { renameTarget = nil }
             } message: {
-                Text("This only changes how the game is named in Ymir.")
+                Text("The game's files are renamed as well (the extensions stay), so the name is the same in the Files app and in the game menu.")
             }
             .sheet(item: $searchTarget) { game in
                 ArtworkSearchView(game: game) { data in

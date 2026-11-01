@@ -289,6 +289,111 @@ final class GameLibrary: ObservableObject {
         if reloadAfter { reload() }
     }
 
+    // MARK: Renaming the files
+
+    /// Gives the game's files a new name (the extensions stay): the descriptor and its tracks, the sheet's references to
+    /// the tracks, the artwork, and what the app remembers about the game (play time, place in the order, save states).
+    /// Returns what went wrong, or nil.
+    func renameFiles(of game: GameEntry, to requested: String) -> String? {
+        let forbidden = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters)
+        var name = requested.components(separatedBy: forbidden).joined(separator: " ")
+        name = name.trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: ".")))
+        while name.contains("  ") { name = name.replacingOccurrences(of: "  ", with: " ") }
+        guard !name.isEmpty else { return "That name can't be used for a file." }
+
+        if name == game.stem {
+            rename(game, to: nil)
+            return nil
+        }
+        if let loaded = YmirHost.loadedGamePath, YmirHost.isDiscLoaded,
+           URL(fileURLWithPath: loaded).standardizedFileURL == game.url.standardizedFileURL {
+            return "The game is running. Close it first."
+        }
+
+        let fm = FileManager.default
+        let dir = game.url.deletingLastPathComponent()
+        let ext = game.url.pathExtension
+        let newDescriptor = dir.appendingPathComponent(name).appendingPathExtension(ext)
+
+        // The files to move, with the names they get
+        var moves: [(from: URL, to: URL)] = [(game.url, newDescriptor)]
+        var sheetNames: [(old: String, new: String)] = []
+        let related = game.relatedFiles().filter { $0 != game.url }
+        let others = Set(games.filter { $0.id != game.id }.flatMap { $0.relatedFiles().map(\.path) })
+        if related.contains(where: { others.contains($0.path) }) {
+            return "The game shares files with another game, so its files can't be renamed."
+        }
+
+        switch ext.lowercased() {
+        case "cue":
+            var taken = Set<String>([newDescriptor.lastPathComponent])
+            for (index, file) in related.enumerated() {
+                let fileStem = file.deletingPathExtension().lastPathComponent
+                var newStem = fileStem.hasPrefix(game.stem) ? name + String(fileStem.dropFirst(game.stem.count))
+                                                              : (index == 0 ? name : "\(name) (\(index + 1))")
+                var candidate = newStem + "." + file.pathExtension
+                var counter = 2
+                while taken.contains(candidate) {
+                    newStem = "\(name) (\(counter))"
+                    candidate = newStem + "." + file.pathExtension
+                    counter += 1
+                }
+                taken.insert(candidate)
+                moves.append((file, dir.appendingPathComponent(candidate)))
+                sheetNames.append((file.lastPathComponent, candidate))
+            }
+        default:
+            // CCD and MDS: the image files are named like the descriptor
+            for file in related {
+                moves.append((file, dir.appendingPathComponent(name).appendingPathExtension(file.pathExtension)))
+            }
+        }
+
+        for move in moves where fm.fileExists(atPath: move.to.path) && move.from != move.to {
+            return "A file named \(move.to.lastPathComponent) is there already."
+        }
+
+        // Move them; put everything back if one fails
+        var done: [(from: URL, to: URL)] = []
+        do {
+            for move in moves {
+                try fm.moveItem(at: move.from, to: move.to)
+                done.append(move)
+            }
+            if ext.lowercased() == "cue" {
+                let data = try Data(contentsOf: newDescriptor)
+                let utf8 = String(data: data, encoding: .utf8)
+                var text = utf8 ?? String(data: data, encoding: .isoLatin1) ?? ""
+                for pair in sheetNames {
+                    text = text.replacingOccurrences(of: "\"\(pair.old)\"", with: "\"\(pair.new)\"")
+                }
+                try (utf8 != nil ? text.data(using: .utf8) : text.data(using: .isoLatin1))?.write(to: newDescriptor)
+            }
+        } catch {
+            for move in done.reversed() {
+                try? fm.moveItem(at: move.to, to: move.from)
+            }
+            return "The files couldn't be renamed: \(error.localizedDescription)"
+        }
+
+        // What the app keeps about the game goes with it
+        rename(game, to: nil, reloadAfter: false)
+        let renamed = GameEntry(url: newDescriptor, sizeBytes: game.sizeBytes)
+        Self.transferMetadata(from: game, toRelativePath: renamed.relativePath)
+        SaveStateCatalog.relink(from: game.relativePath, to: renamed.relativePath)
+        for folder in [AppPaths.covers, dir] {
+            for imageExt in ["png", "jpg", "jpeg"] {
+                let old = folder.appendingPathComponent(game.stem + "." + imageExt)
+                let new = folder.appendingPathComponent(name + "." + imageExt)
+                if fm.fileExists(atPath: old.path) && !fm.fileExists(atPath: new.path) {
+                    try? fm.moveItem(at: old, to: new)
+                }
+            }
+        }
+        reload()
+        return nil
+    }
+
     // MARK: Artwork
 
     func hasCustomArtwork(_ game: GameEntry) -> Bool {
