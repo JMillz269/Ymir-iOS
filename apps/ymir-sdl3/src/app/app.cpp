@@ -154,6 +154,22 @@ using clk = std::chrono::steady_clock;
 
 namespace app {
 
+#if YMIR_PLATFORM_IOS
+// Hands finger events to the on-screen controls as soon as SDL receives them from UIKit (see where it is registered)
+static bool SDLCALL TouchEventWatch(void *userdata, SDL_Event *event) {
+    switch (event->type) {
+    case SDL_EVENT_FINGER_DOWN: [[fallthrough]];
+    case SDL_EVENT_FINGER_MOTION: [[fallthrough]];
+    case SDL_EVENT_FINGER_UP: [[fallthrough]];
+    case SDL_EVENT_FINGER_CANCELED:
+        static_cast<input::TouchControls *>(userdata)->HandleFingerEventNow(*event);
+        break;
+    default: break;
+    }
+    return true;
+}
+#endif
+
 template <typename... TArgs>
 static void ShowStartupFailure(fmt::format_string<TArgs...> fmt, TArgs &&...args) {
     std::string message = fmt::format(fmt, static_cast<TArgs &&>(args)...);
@@ -1571,6 +1587,16 @@ void App::RunEmulator() {
 #if YMIR_PLATFORM_IOS
     // On-screen control pad, driven by touch events. Hidden while a hardware gamepad is connected.
     input::TouchControls touchControls{m_context.inputContext};
+    // Finger events are handled the moment they are pumped in from UIKit, not when the GUI loop gets to them: the loop
+    // also pumps while it waits for the emulator and for the frame's time, so a touch reaches the pad within about a
+    // millisecond instead of up to a whole frame (or more on a heavy frame) later
+    SDL_AddEventWatch(TouchEventWatch, &touchControls);
+    struct TouchWatchGuard {
+        input::TouchControls *controls;
+        ~TouchWatchGuard() {
+            SDL_RemoveEventWatch(TouchEventWatch, controls);
+        }
+    } touchWatchGuard{&touchControls};
     SDL_DisableScreenSaver();
 
     // Expose the emulator to the native iOS user interface (game library, settings and in-game menu)
@@ -1848,7 +1874,20 @@ void App::RunEmulator() {
                         sleepTime = frameInterval * 2;
                         skipDelay = true;
                     }
+#if YMIR_PLATFORM_IOS
+                    // Keep taking touches while waiting: they reach the controls through the event watch
+                    const auto wakeTime = clk::now() + sleepTime;
+                    while (true) {
+                        SDL_PumpEvents();
+                        const auto left = wakeTime - clk::now();
+                        if (left <= decltype(left)::zero()) {
+                            break;
+                        }
+                        std::this_thread::sleep_for(std::min<std::chrono::nanoseconds>(left, 1ms));
+                    }
+#else
                     std::this_thread::sleep_for(sleepTime);
+#endif
                 }
                 if (!skipDelay) {
                     while (clk::now() < screen.nextFrameTarget) {
@@ -1879,6 +1918,9 @@ void App::RunEmulator() {
         }
 
         // Process SDL events
+#if YMIR_PLATFORM_IOS
+        touchControls.SetPointerContext(io.DisplaySize, io.WantCaptureMouse);
+#endif
         SDL_Event evt{};
         while (SDL_PollEvent(&evt)) {
             ImGui_ImplSDL3_ProcessEvent(&evt);
@@ -2071,7 +2113,7 @@ void App::RunEmulator() {
             case SDL_EVENT_FINGER_MOTION: [[fallthrough]];
             case SDL_EVENT_FINGER_UP: [[fallthrough]];
             case SDL_EVENT_FINGER_CANCELED: //
-                touchControls.ProcessFingerEvent(evt, io.DisplaySize, io.WantCaptureMouse);
+                // (already handled by the event watch, when SDL received it)
                 break;
 #endif
 
@@ -2426,7 +2468,14 @@ void App::RunEmulator() {
         // Update display
         if (screen.videoSync && screen.expectFrame && !m_context.paused) {
             const auto perfWaitStart = ymir::perf::Clock::now();
+#if YMIR_PLATFORM_IOS
+            // Keep taking touches while the emulator finishes the frame (with Frame Delay, most of the frame is spent here)
+            while (!screen.frameReadyEvent.WaitFor(1ms)) {
+                SDL_PumpEvents();
+            }
+#else
             screen.frameReadyEvent.Wait();
+#endif
             ymir::perf::guiWaitNs.fetch_add(ymir::perf::NanosecondsSince(perfWaitStart), std::memory_order_relaxed);
             screen.frameReadyEvent.Reset();
             screen.expectFrame = false;

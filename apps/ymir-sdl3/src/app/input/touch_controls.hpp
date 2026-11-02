@@ -100,6 +100,16 @@ public:
     /// @param[in] imguiWantsPointer true if ImGui wants to capture the pointer
     void ProcessFingerEvent(const SDL_Event &evt, ImVec2 displaySize, bool imguiWantsPointer);
 
+    /// Handles a finger event as soon as it arrives and updates the controls' state right away, without waiting for the
+    /// next Update. Called from an SDL event watch, which runs while the events are pumped (on the main thread).
+    void HandleFingerEventNow(const SDL_Event &evt);
+
+    /// The display size and whether the UI wants the pointer, for the events handled as they arrive
+    void SetPointerContext(ImVec2 displaySize, bool imguiWantsPointer) {
+        m_lastDisplaySize = displaySize;
+        m_lastImguiWantsPointer = imguiWantsPointer;
+    }
+
     /// @brief Recomputes the pressed controls from active fingers and emits input primitives.
     void Update(SDL_Window *window, ImVec2 displaySize);
 
@@ -181,6 +191,9 @@ private:
     ImVec2 ElementCenter(int element) const;
     void ApplyState(const std::array<bool, _Count> &state);
 
+    // Works out which controls the fingers press and hands the change to the emulator
+    void RefreshState();
+
     // The controls a finger at this position is on (the D-pad directions included)
     std::array<bool, _Count> ControlsAt(ImVec2 pos) const;
     void ReleaseAll();
@@ -218,6 +231,9 @@ private:
     std::chrono::steady_clock::time_point m_dirtyTime;
     std::unordered_map<SDL_FingerID, ImVec2> m_fingers;
     std::array<bool, _Count> m_state{};
+    // What the last ProcessFingerEvent call was given, for events handled as soon as they arrive
+    ImVec2 m_lastDisplaySize{0.0f, 0.0f};
+    bool m_lastImguiWantsPointer = false;
     // A control stays pressed until this time at least: the emulator reads the pad once per frame, so a tap shorter than
     // that (or one whose press and release are both handled between two frames) would never be seen
     std::array<std::chrono::steady_clock::time_point, _Count> m_holdUntil{};

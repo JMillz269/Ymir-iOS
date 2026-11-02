@@ -16,6 +16,7 @@
 
     #include <atomic>
 #else
+    #include <chrono>
     #include <condition_variable>
     #include <mutex>
 #endif
@@ -108,6 +109,14 @@ public:
     void Wait() {
         std::unique_lock<std::mutex> lock(m_mutex);
         m_condVar.wait(lock, [this] { return m_set; });
+    }
+
+    /// @brief Waits until the event is signaled or the timeout expires.
+    /// @return whether the event was signaled
+    template <class Rep, class Period>
+    bool WaitFor(std::chrono::duration<Rep, Period> timeout) {
+        std::unique_lock<std::mutex> lock(m_mutex);
+        return m_condVar.wait_for(lock, timeout, [this] { return m_set; });
     }
 
     /// @brief Signals the event and notifies all waiting threads.

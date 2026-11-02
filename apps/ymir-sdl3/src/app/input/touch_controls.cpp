@@ -2,7 +2,10 @@
 #include "touch_controls_atlas.hpp"
 
 #include <SDL3/SDL_stdinc.h>
+#include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_touch.h>
+
+#include <ymir/util/perf_counters.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -61,9 +64,40 @@ void TouchControls::SetHardwareGamepadPresent(bool present) {
     }
 }
 
+void TouchControls::HandleFingerEventNow(const SDL_Event &evt) {
+    if (m_lastDisplaySize.x <= 0.0f || m_lastDisplaySize.y <= 0.0f) {
+        return; // not laid out yet; the event is handled with the others
+    }
+    ProcessFingerEvent(evt, m_lastDisplaySize, m_lastImguiWantsPointer);
+    if (!m_editing && m_enabled && !m_hardwareGamepad) {
+        RefreshState();
+    }
+}
+
 void TouchControls::ProcessFingerEvent(const SDL_Event &evt, ImVec2 displaySize, bool imguiWantsPointer) {
     const SDL_TouchFingerEvent &finger = evt.tfinger;
     const ImVec2 pos{finger.x * displaySize.x, finger.y * displaySize.y};
+    m_lastDisplaySize = displaySize;
+    m_lastImguiWantsPointer = imguiWantsPointer;
+
+    // With the performance log on, note touches that reach the app late: the event's time is when the system took the
+    // touch, so this is the whole delay before the app sees it
+    if (ymir::perf::detailedLog.load(std::memory_order_relaxed) && !m_logPath.empty() &&
+        (evt.type == SDL_EVENT_FINGER_DOWN || evt.type == SDL_EVENT_FINGER_UP) && finger.timestamp != 0) {
+        const Uint64 nowNs = SDL_GetTicksNS();
+        const double lateMs = nowNs > finger.timestamp ? (double)(nowNs - finger.timestamp) / 1e6 : 0.0;
+        if (lateMs >= 40.0) {
+            std::ofstream log{m_logPath, std::ios::app};
+            if (log) {
+                const std::time_t now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+                char stamp[32]{};
+                std::strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", std::localtime(&now));
+                log << stamp << ": touch " << (evt.type == SDL_EVENT_FINGER_DOWN ? "down" : "up") << " at ("
+                    << static_cast<int>(pos.x) << ", " << static_cast<int>(pos.y) << ") reached the app "
+                    << static_cast<int>(lateMs) << " ms after it happened\n";
+            }
+        }
+    }
 
     if (m_editing) {
         ProcessEditingFingerEvent(evt, pos);
@@ -521,7 +555,10 @@ void TouchControls::Update(SDL_Window *window, ImVec2 displaySize) {
     }
 
     DropEndedFingers();
+    RefreshState();
+}
 
+void TouchControls::RefreshState() {
     std::array<bool, _Count> state{};
     for (const auto &[id, pos] : m_fingers) {
         const std::array<bool, _Count> hit = ControlsAt(pos);
