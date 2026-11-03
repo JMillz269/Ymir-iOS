@@ -598,9 +598,16 @@ private struct BIOSBanner: View {
                 .foregroundStyle(.orange)
             Text("Ymir needs a Sega Saturn BIOS (IPL ROM) image to run games. Import one to get started.")
                 .font(.subheadline)
-                .foregroundStyle(.secondary)
-            Button("Import BIOS…", action: onImport)
-                .ymirProminentButton()
+                .foregroundStyle(.primary.opacity(0.85))
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                onImport()
+            } label: {
+                Text("Import BIOS…")
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            .ymirProminentButton()
         }
         .padding(.vertical, 6)
     }
