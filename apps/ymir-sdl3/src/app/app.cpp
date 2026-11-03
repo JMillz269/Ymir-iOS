@@ -1698,6 +1698,53 @@ void App::RunEmulator() {
         m_context.EnqueueEvent(events::emu::HardReset());
         return {};
     };
+    iosHost.iplIsAutomatic = [this] {
+        std::error_code error{};
+        return !(m_settings.system.ipl.overrideImage && !m_settings.system.ipl.path.empty() &&
+                 std::filesystem::is_regular_file(m_settings.system.ipl.path, error));
+    };
+    iosHost.listIPLROMs = [this] {
+        m_romService.ScanIPLROMs();
+        std::vector<app::ios::BiosEntry> list;
+        {
+            std::unique_lock lock{m_context.locks.romManager};
+            for (const auto &[path, entry] : m_context.romManager.GetIPLROMs()) {
+                app::ios::BiosEntry bios;
+                bios.path = path.string();
+                bios.fileName = path.filename().string();
+                if (entry.info != nullptr && entry.info->version != nullptr) {
+                    bios.detail = fmt::format("Version {} ({:04d}-{:02d}-{:02d})", entry.info->version, entry.info->year,
+                                              entry.info->month, entry.info->day);
+                } else {
+                    bios.detail = "Not a known image";
+                }
+                std::error_code equivalentError{};
+                bios.selected = !m_context.iplRomPath.empty() &&
+                                std::filesystem::equivalent(path, m_context.iplRomPath, equivalentError);
+                list.push_back(std::move(bios));
+            }
+        }
+        std::sort(list.begin(), list.end(),
+                  [](const auto &a, const auto &b) { return a.fileName < b.fileName; });
+        return list;
+    };
+    iosHost.selectIPLROM = [this](const std::string &path) -> std::string {
+        if (path.empty()) {
+            m_settings.system.ipl.overrideImage = false;
+            m_settings.system.ipl.path.clear();
+        } else {
+            m_settings.system.ipl.overrideImage = true;
+            m_settings.system.ipl.path = std::filesystem::path{path};
+        }
+        m_settings.MakeDirty();
+        m_romService.ScanIPLROMs();
+        const util::ROMLoadResult result = m_romService.LoadIPLROM();
+        if (!result.succeeded) {
+            return result.errorMessage.empty() ? std::string{"The image couldn't be loaded"} : std::string{result.errorMessage};
+        }
+        m_context.EnqueueEvent(events::emu::HardReset());
+        return {};
+    };
     touchControls.SetStoragePath(m_context.profile.GetPath(ProfilePath::PersistentState) / "touch_layout.cfg");
     app::ios::InstallSettingsAccessors(iosHost, m_context, settings, {.touchControls = &touchControls});
     iosHost.quitGame = [this] {

@@ -65,6 +65,14 @@ NS_ASSUME_NONNULL_BEGIN
 /// Rescans the BIOS folder and loads an IPL ROM. Returns an error message, or nil on success.
 + (nullable NSString *)reloadBIOS NS_SWIFT_NAME(reloadBIOS());
 
+/// The BIOS images in the BIOS folder: dictionaries with "path", "name" (the file name), "detail" and "selected".
++ (NSArray<NSDictionary<NSString *, id> *> *)biosList NS_SWIFT_NAME(biosList());
+/// Whether the emulator picks the BIOS itself (by the region of the game) instead of the user's choice.
+@property(class, nonatomic, readonly) BOOL biosIsAutomatic;
+/// Uses this BIOS image (nil: let the emulator pick), reloads it and restarts the system.
+/// Returns an error message, or nil on success.
++ (nullable NSString *)selectBIOSAtPath:(nullable NSString *)path NS_SWIFT_NAME(selectBIOS(path:));
+
 /// Returns an array of dictionaries with keys "index" (NSNumber), "present" (NSNumber) and "text" (NSString).
 + (NSArray<NSDictionary<NSString *, id> *> *)saveSlots NS_SWIFT_NAME(saveSlots());
 
