@@ -331,8 +331,10 @@ struct BadgeImage: View {
 /// Settings > Achievements
 struct AchievementsSettingsView: View {
     @ObservedObject private var model = AchievementsModel.shared
-    @State private var enabled = YmirHost.achievementsEnabled
-    @State private var hardcore = YmirHost.achievementsHardcore
+    // (the app's own preferences, which the emulator side reads too: the switches show what is stored, and the home of the
+    // settings is refreshed when they change)
+    @AppStorage("ymir.ra.enabled") private var enabled = false
+    @AppStorage("ymir.ra.hardcore") private var hardcore = false
     @State private var username = ""
     @State private var password = ""
     @State private var loginError: String?
@@ -361,8 +363,9 @@ struct AchievementsSettingsView: View {
         GlassForm {
             GlassSection(content: {
                 Toggle("RetroAchievements", isOn: $enabled)
-                    .onChange(of: enabled) { value in
-                        YmirHost.achievementsEnabled = value
+                    .onChange(of: enabled) { _ in
+                        // (tells the service; the value is already stored)
+                        YmirHost.achievementsEnabled = enabled
                         model.refresh()
                     }
             }, footer: {
@@ -424,8 +427,8 @@ struct AchievementsSettingsView: View {
 
                 GlassSection(content: {
                     Toggle("Hardcore Mode", isOn: $hardcore)
-                        .onChange(of: hardcore) { value in
-                            YmirHost.achievementsHardcore = value
+                        .onChange(of: hardcore) { _ in
+                            YmirHost.achievementsHardcore = hardcore
                             model.refresh()
                         }
                 }, footer: {

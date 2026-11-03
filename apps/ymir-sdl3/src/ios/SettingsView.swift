@@ -273,6 +273,8 @@ private struct SettingsGroup<Content: View>: View {
 /// The app's settings. Everything that was in the desktop frontend's menus and settings window lives here.
 struct SettingsView: View {
     @ObservedObject private var store = SettingStore.shared
+    @AppStorage("ymir.ra.enabled") private var achievementsEnabled = false
+    @AppStorage("ymir.ra.hardcore") private var achievementsHardcore = false
     @ObservedObject private var theme = BackdropTheme.shared
     @State private var hasBIOS = YmirHost.hasBIOS
     @State private var biosName = YmirHost.biosName
@@ -320,7 +322,7 @@ struct SettingsView: View {
     }
 
     private var achievementsValue: String {
-        YmirHost.achievementsEnabled ? (YmirHost.achievementsHardcore ? "Hardcore" : "On") : "Off"
+        achievementsEnabled ? (achievementsHardcore ? "Hardcore" : "On") : "Off"
     }
 
     private var advancedValue: String {
