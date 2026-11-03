@@ -29,7 +29,7 @@ namespace {
 
     void *CdOpenTrack(const char *path, uint32_t trackNumber) {
         auto handle = std::make_unique<DiscTrackHandle>();
-        if (!ymir::media::LoadDisc(std::filesystem::u8path(path), handle->disc, false, [](auto, std::string) {})) {
+        if (!ymir::media::LoadDisc(std::filesystem::path{path}, handle->disc, false, [](auto, std::string) {})) {
             return nullptr;
         }
 
@@ -233,7 +233,7 @@ void AchievementsService::LoadGame(const std::filesystem::path &path) {
     m_gameRequested = true;
     m_gameLoading = true;
     m_gameUnknown = false;
-    const std::string utf8 = path.u8string();
+    const std::string utf8 = path.string(); // (UTF-8 on this platform)
     rc_client_begin_identify_and_load_game(m_client, RC_CONSOLE_SATURN, utf8.c_str(), nullptr, 0,
                                            &AchievementsService::LoadGameDone, this);
 }
