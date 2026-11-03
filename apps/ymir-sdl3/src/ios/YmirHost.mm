@@ -345,6 +345,37 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     return error.empty() ? nil : ToNSString(error);
 }
 
++ (NSArray<NSDictionary<NSString *, id> *> *)biosList {
+    auto &host = app::ios::GetHost();
+    NSMutableArray *result = [NSMutableArray array];
+    if (!host.listIPLROMs) {
+        return result;
+    }
+    for (const auto &bios : host.listIPLROMs()) {
+        [result addObject:@{
+            @"path" : ToNSString(bios.path),
+            @"name" : ToNSString(bios.fileName),
+            @"detail" : ToNSString(bios.detail),
+            @"selected" : @(bios.selected),
+        }];
+    }
+    return result;
+}
+
++ (BOOL)biosIsAutomatic {
+    auto &host = app::ios::GetHost();
+    return host.iplIsAutomatic ? host.iplIsAutomatic() : YES;
+}
+
++ (NSString *)selectBIOSAtPath:(NSString *)path {
+    auto &host = app::ios::GetHost();
+    if (!host.selectIPLROM) {
+        return @"The emulator is not running";
+    }
+    std::string error = host.selectIPLROM(path != nil ? std::string{path.UTF8String} : std::string{});
+    return error.empty() ? nil : ToNSString(error);
+}
+
 + (NSArray<NSDictionary<NSString *, id> *> *)saveSlots {
     NSMutableArray *result = [NSMutableArray array];
     auto &host = app::ios::GetHost();

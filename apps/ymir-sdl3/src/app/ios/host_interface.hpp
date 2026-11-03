@@ -19,6 +19,14 @@ struct SaveSlotInfo {
     std::string description; // e.g. date and time; empty if the slot is empty
 };
 
+/// A BIOS (IPL ROM) image found in the BIOS folder.
+struct BiosEntry {
+    std::string path;     // absolute path
+    std::string fileName;
+    std::string detail;   // what the image is (version and date), or that it isn't a known image
+    bool selected = false; // the one in use
+};
+
 struct HostInterface {
     // -- State queries --
     std::function<bool()> isPaused;
@@ -48,6 +56,11 @@ struct HostInterface {
     std::function<void(int)> deleteState;
     std::function<void()> takeScreenshot;
     std::function<std::string()> reloadIPLROM; // rescans the IPL ROM folder; returns an error message or "" on success
+    std::function<std::vector<BiosEntry>()> listIPLROMs; // scans the folder; the images found, the one in use marked
+    std::function<bool()> iplIsAutomatic;                // the image is picked by the emulator (by region), not by the user
+    // Uses this image (an empty path: let the emulator pick by region), reloads it and restarts the system.
+    // Returns an error message or "" on success.
+    std::function<std::string(const std::string &)> selectIPLROM;
 
     // -- Settings --
     std::function<bool(const std::string &, bool)> getBool;    // key, default

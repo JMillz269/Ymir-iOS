@@ -279,6 +279,10 @@ struct SettingsView: View {
     @State private var showImporter = false
     @State private var isImporting = false
     @State private var biosAlert: String?
+    @State private var biosOptions: [[String: Any]] = []
+    @State private var biosAutomatic = true
+    @State private var pendingBIOSPath: String?
+    @State private var confirmBIOSChange = false
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
@@ -429,6 +433,15 @@ struct SettingsView: View {
         .onAppear {
             hasBIOS = YmirHost.hasBIOS
             biosName = YmirHost.biosName
+            refreshBIOSOptions()
+        }
+        .confirmationDialog("Switch BIOS?", isPresented: $confirmBIOSChange, titleVisibility: .visible) {
+            Button("Switch and Restart") {
+                applyBIOS(pendingBIOSPath)
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("The system restarts with the other BIOS, so the game that is running starts over. Save first if you need to.")
         }
         .overlay {
             if isImporting {
@@ -452,16 +465,7 @@ struct SettingsView: View {
     private func biosCard(width: CGFloat) -> some View {
         HStack(spacing: 12) {
             SettingsIcon(systemName: "cpu", tint: hasBIOS ? .green : .orange, size: 40)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(hasBIOS ? "Saturn BIOS ready" : "BIOS required")
-                    .font(.headline)
-                Text(hasBIOS ? biosName : "Import a Sega Saturn BIOS (IPL ROM) to run games.")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .truncationMode(.middle)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
+            biosTitle
             Spacer(minLength: 8)
             Button(hasBIOS ? "Replace" : "Import") {
                 showImporter = true
@@ -475,6 +479,85 @@ struct SettingsView: View {
         .ymirGlassCard()
     }
 
+    /// The name of the BIOS in use. With more than one image in the BIOS folder, it's a menu to choose the image.
+    @ViewBuilder
+    private var biosTitle: some View {
+        let content = VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 4) {
+                Text(hasBIOS ? "Saturn BIOS ready" : "BIOS required")
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                if biosOptions.count > 1 {
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Text(hasBIOS ? biosName : "Import a Sega Saturn BIOS (IPL ROM) to run games.")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .truncationMode(.middle)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            if biosOptions.count > 1 {
+                Text(biosAutomatic ? "Chosen automatically · tap to choose" : "Tap to choose another")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        if biosOptions.count > 1 {
+            Menu {
+                Button {
+                    chooseBIOS(nil)
+                } label: {
+                    Label("Automatic (by region)", systemImage: biosAutomatic ? "checkmark" : "wand.and.stars")
+                }
+                Divider()
+                ForEach(biosOptions.indices, id: \.self) { index in
+                    let option = biosOptions[index]
+                    let name = option["name"] as? String ?? ""
+                    let detail = option["detail"] as? String ?? ""
+                    let selected = (option["selected"] as? Bool ?? false) && !biosAutomatic
+                    Button {
+                        chooseBIOS(option["path"] as? String)
+                    } label: {
+                        Label("\(name) — \(detail)", systemImage: selected ? "checkmark" : "cpu")
+                    }
+                }
+            } label: {
+                content
+            }
+            .buttonStyle(.plain)
+        } else {
+            content
+        }
+    }
+
+    private func refreshBIOSOptions() {
+        biosOptions = YmirHost.biosList()
+        biosAutomatic = YmirHost.biosIsAutomatic
+    }
+
+    /// Switches to another BIOS image (nil: automatic). A game that is running starts over, so that is asked first.
+    private func chooseBIOS(_ path: String?) {
+        pendingBIOSPath = path
+        if YmirHost.isDiscLoaded {
+            confirmBIOSChange = true
+        } else {
+            applyBIOS(path)
+        }
+    }
+
+    private func applyBIOS(_ path: String?) {
+        if let error = YmirHost.selectBIOS(path: path) {
+            biosAlert = error
+        }
+        hasBIOS = YmirHost.hasBIOS
+        biosName = YmirHost.biosName
+        refreshBIOSOptions()
+    }
+
     private func importBIOS(_ urls: [URL]) {
         isImporting = true
         Task {
@@ -484,6 +567,7 @@ struct SettingsView: View {
             let error = YmirHost.reloadBIOS()
             hasBIOS = YmirHost.hasBIOS
             biosName = YmirHost.biosName
+            refreshBIOSOptions()
             isImporting = false
             if !hasBIOS {
                 biosAlert = error ?? "That file doesn't look like a valid Sega Saturn BIOS. Try a different image."
