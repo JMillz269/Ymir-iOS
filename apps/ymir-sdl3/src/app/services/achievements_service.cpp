@@ -405,12 +405,17 @@ void AchievementsService::LoadGameDone(int result, const char *errorMessage, rc_
             rc_client_get_user_game_summary(client, &summary);
             event.points = summary.points_core;
             event.id = summary.num_core_achievements;
-            event.message = "You have unlocked " + std::to_string(summary.num_unlocked_achievements) + " of " +
-                            std::to_string(summary.num_core_achievements) + " achievements";
+            if (summary.num_core_achievements == 0) {
+                event.message = "This game doesn't have any achievements yet";
+            } else {
+                event.message = "You have unlocked " + std::to_string(summary.num_unlocked_achievements) + " of " +
+                                std::to_string(summary.num_core_achievements) + " achievements";
+            }
         } else if (result == RC_NO_GAME_LOADED) {
             // The game isn't known to RetroAchievements
             self->m_gameUnknown = true;
-            return;
+            event.kind = ios::AchievementEvent::Kind::GameUnknown;
+            event.message = "No achievements for this game: RetroAchievements doesn't know this disc";
         } else if (result == RC_ABORTED) {
             return;
         } else {

@@ -111,6 +111,7 @@ struct AchievementEvent {
     enum class Kind {
         Unlocked,        // an achievement was earned
         GameLoaded,      // the loaded game is known: title, number of achievements
+        GameUnknown,     // RetroAchievements doesn't know the loaded game (it has no achievements, or this disc isn't one of theirs)
         GameCompleted,   // every achievement of the game was earned
         LoginSucceeded,
         LoginFailed,     // message

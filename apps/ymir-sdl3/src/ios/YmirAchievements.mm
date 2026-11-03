@@ -65,6 +65,7 @@ static NSString *KindName(app::ios::AchievementEvent::Kind kind) {
     switch (kind) {
     case Kind::Unlocked: return @"unlocked";
     case Kind::GameLoaded: return @"gameLoaded";
+    case Kind::GameUnknown: return @"gameUnknown";
     case Kind::GameCompleted: return @"gameCompleted";
     case Kind::LoginSucceeded: return @"loginSucceeded";
     case Kind::LoginFailed: return @"loginFailed";

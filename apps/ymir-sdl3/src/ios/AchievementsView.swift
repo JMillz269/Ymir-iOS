@@ -169,6 +169,8 @@ final class AchievementsModel: ObservableObject {
                                      subtitle: "\(detail)\n\(points) point\(points == 1 ? "" : "s")", badgeURL: badge))
         case "gameLoaded":
             enqueue(AchievementToast(style: .info, title: title, subtitle: message, badgeURL: badge))
+        case "gameUnknown":
+            enqueue(AchievementToast(style: .problem, title: "Game Not Supported", subtitle: message, badgeURL: nil))
         case "gameCompleted":
             enqueue(AchievementToast(style: .info, title: "Game Completed", subtitle: title, badgeURL: nil))
         case "loginSucceeded":
