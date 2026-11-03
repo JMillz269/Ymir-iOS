@@ -1587,6 +1587,11 @@ void App::RunEmulator() {
 #if YMIR_PLATFORM_IOS
     // On-screen control pad, driven by touch events. Hidden while a hardware gamepad is connected.
     input::TouchControls touchControls{m_context.inputContext};
+
+    // RetroAchievements
+    m_achievementsService = std::make_unique<services::AchievementsService>(m_context);
+    m_achievementsService->requestReset = [this] { m_context.EnqueueEvent(events::emu::HardReset()); };
+    m_achievementsService->Initialize();
     // Finger events are handled the moment they are pumped in from UIKit, not when the GUI loop gets to them: the loop
     // also pumps while it waits for the emulator and for the frame's time, so a touch reaches the pad within about a
     // millisecond instead of up to a whole frame (or more on a heavy frame) later
@@ -1641,6 +1646,10 @@ void App::RunEmulator() {
         m_context.EnqueueEvent(events::emu::SetPaused(false));
         m_context.emuSpeed.limitSpeed = true;
         m_context.audioSystem.SetSync(m_context.emuSpeed.ShouldSyncToAudio());
+        if (IsHardcoreForbidding()) {
+            m_context.DisplayMessage("Hardcore mode: save states can't be loaded");
+            return;
+        }
         m_saveStateService.LoadSaveStateSlot(static_cast<std::size_t>(slot));
     };
     iosHost.autoSave = [this, saveThumbnail, &screen](std::function<void()> done) {
@@ -1668,7 +1677,13 @@ void App::RunEmulator() {
     iosHost.openCloseTray = [this] { m_context.EnqueueEvent(events::emu::OpenCloseTray()); };
     iosHost.ejectDisc = [this] { m_context.EnqueueEvent(events::emu::EjectDisc()); };
     iosHost.saveState = [this](int slot) { m_saveStateService.SaveSaveStateSlot(static_cast<std::size_t>(slot)); };
-    iosHost.loadState = [this](int slot) { m_saveStateService.LoadSaveStateSlot(static_cast<std::size_t>(slot)); };
+    iosHost.loadState = [this](int slot) {
+        if (IsHardcoreForbidding()) {
+            m_context.DisplayMessage("Hardcore mode: save states can't be loaded");
+            return;
+        }
+        m_saveStateService.LoadSaveStateSlot(static_cast<std::size_t>(slot));
+    };
     iosHost.deleteState = [this](int slot) { m_saveStateService.DeleteSaveStateSlot(static_cast<std::size_t>(slot)); };
     iosHost.saveStatePath = [this](int slot) {
         return m_saveStateService.SaveStateSlotPath(static_cast<std::size_t>(slot));
@@ -4023,10 +4038,20 @@ void App::EmulatorThread() {
             case HardReset:
                 m_context.saturn.instance->Reset(true);
                 m_context.rewindBuffer.Reset();
+#if YMIR_PLATFORM_IOS
+                if (m_achievementsService) {
+                    m_achievementsService->Reset();
+                }
+#endif
                 m_context.DisplayMessage("Hard reset triggered");
                 break;
             case SoftReset:
                 m_context.saturn.instance->Reset(false);
+#if YMIR_PLATFORM_IOS
+                if (m_achievementsService) {
+                    m_achievementsService->Reset();
+                }
+#endif
                 m_context.DisplayMessage("Soft reset triggered");
                 break;
             case SetResetButton:
@@ -4090,6 +4115,11 @@ void App::EmulatorThread() {
                 auto &path = std::get<std::filesystem::path>(evt.value);
                 // LoadDiscImage locks the disc mutex
                 if (m_discService.LoadDiscImage(path, true)) {
+#if YMIR_PLATFORM_IOS
+                    if (m_achievementsService) {
+                        m_achievementsService->LoadGame(path);
+                    }
+#endif
                     m_saveStateService.LoadSaveStates();
                     m_saveStateService.LoadDebuggerState();
                     auto iplLoadResult = m_romService.LoadIPLROM();
@@ -4124,6 +4154,11 @@ void App::EmulatorThread() {
                 m_context.saturn.instance->EjectDisc();
                 m_context.state.loadedDiscImagePath.clear();
                 m_context.state.loadedDiscDrivePath.clear();
+#if YMIR_PLATFORM_IOS
+                if (m_achievementsService) {
+                    m_achievementsService->UnloadGame();
+                }
+#endif
                 if (settings.system.internalBackupRAMPerGame) {
                     m_context.EnqueueEvent(events::emu::LoadInternalBackupMemory());
                 }
@@ -4204,6 +4239,11 @@ void App::EmulatorThread() {
 
             if (doRunFrame) [[likely]] {
                 m_context.saturn.instance->RunFrame();
+#if YMIR_PLATFORM_IOS
+                if (m_achievementsService) {
+                    m_achievementsService->DoFrame();
+                }
+#endif
             }
 
             if (rewindEnabled && !m_context.rewinding) {
@@ -4233,7 +4273,22 @@ void App::EmulatorThread() {
     }
 }
 
+#if YMIR_PLATFORM_IOS
+bool App::IsHardcoreForbidding() {
+    auto &bridge = ios::GetAchievementsBridge();
+    // Hardcore is on in the settings, with the achievements on: loading states isn't allowed (even before the game is
+    // identified, so that a state can't be loaded as the game starts)
+    return bridge.enabled && bridge.enabled() && bridge.hardcore && bridge.hardcore();
+}
+#endif
+
 void App::EnableRewindBuffer(bool enable) {
+#if YMIR_PLATFORM_IOS
+    if (enable && IsHardcoreForbidding()) {
+        m_context.DisplayMessage("Hardcore mode: rewinding isn't allowed");
+        return;
+    }
+#endif
     bool wasEnabled = m_context.rewindBuffer.IsRunning();
     if (enable != wasEnabled) {
         if (enable) {

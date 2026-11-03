@@ -322,7 +322,7 @@ struct GamesView: View {
             Label("Play", systemImage: "play.fill")
         }
         let states = SaveStateCatalog.slots(for: game, in: savedStates)
-        if !states.isEmpty {
+        if !states.isEmpty && !AchievementsModel.hardcoreLocksStates {
             Menu {
                 ForEach(states) { slot in
                     Button {

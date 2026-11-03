@@ -284,7 +284,7 @@ struct SaveStateManagerView: View {
                                 load(slot, of: entry)
                             }
                             .ymirSecondaryButton()
-                            .disabled(entry.game == nil)
+                            .disabled(entry.game == nil || AchievementsModel.hardcoreLocksStates)
                             Menu {
                                 Button {
                                     export(slot, of: entry)

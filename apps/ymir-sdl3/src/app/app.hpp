@@ -6,6 +6,11 @@
 #include "settings.hpp"
 #include "shared_context.hpp"
 
+#include <util/platform.hpp>
+
+#if YMIR_PLATFORM_IOS
+    #include "services/achievements_service.hpp"
+#endif
 #include "services/disc_service.hpp"
 #include "services/discord_rpc_service.hpp"
 #include "services/display_service.hpp"
@@ -54,6 +59,9 @@ private:
     services::WindowManagerService m_windowManagerService;
     services::InputService m_inputService;
     services::PersistenceService m_persistenceService;
+#if YMIR_PLATFORM_IOS
+    std::unique_ptr<services::AchievementsService> m_achievementsService;
+#endif
 
     std::thread m_emuThread;
     util::Event m_emuProcessEvent{};
@@ -68,6 +76,11 @@ private:
     void StartEmulatorThread();
     void StopEmulatorThread();
     void EmulatorThread();
+
+#if YMIR_PLATFORM_IOS
+    // Hardcore mode of RetroAchievements is on: save states can't be loaded
+    bool IsHardcoreForbidding();
+#endif
 
     void EnableRewindBuffer(bool enable);
     void ToggleRewindBuffer();

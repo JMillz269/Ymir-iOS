@@ -453,6 +453,8 @@ if (IOS)
         src/app/input/touch_controls.hpp
         src/app/input/touch_controls_atlas.hpp
         src/app/ios/host_interface.hpp
+        src/app/services/achievements_service.cpp
+        src/app/services/achievements_service.hpp
         src/app/ios/ios_settings.cpp
         src/app/ios/ios_settings.hpp
         src/util/ios_platform.hpp
@@ -462,18 +464,20 @@ if (IOS)
         src/ios/Ymir-Bridging-Header.h
         src/ios/YmirHost.h
         src/ios/YmirHost.mm
+        src/ios/YmirAchievements.mm
         src/ios/ArtworkSearchView.swift
         src/ios/GameLibrary.swift
         src/ios/GameMenuView.swift
         src/ios/LauncherRoot.swift
         src/ios/SaveStateLibrary.swift
+        src/ios/AchievementsView.swift
         src/ios/CHDConversion.swift
         src/ios/SettingsView.swift
         src/ios/TouchEditorBar.swift
         src/ios/Theme.swift
         src/ios/YmirShell.swift
     )
-    set_source_files_properties(src/util/ios_platform.mm src/ios/YmirHost.mm PROPERTIES
+    set_source_files_properties(src/util/ios_platform.mm src/ios/YmirHost.mm src/ios/YmirAchievements.mm PROPERTIES
                                 SKIP_PRECOMPILE_HEADERS ON
                                 COMPILE_OPTIONS "-fobjc-arc")
 endif ()
@@ -638,6 +642,8 @@ if (IOS)
         "-framework MetalFX"
         "-framework QuartzCore"
         "-framework AVFoundation"
+        "-framework Security"
+        rcheevos
     )
 endif ()
 target_compile_features(ymir-sdl3 PUBLIC cxx_std_20)

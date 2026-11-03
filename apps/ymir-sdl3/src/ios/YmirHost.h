@@ -79,4 +79,31 @@ NS_ASSUME_NONNULL_BEGIN
 
 @end
 
+/// RetroAchievements. The settings are kept by the app; the emulator side (rc_client) is set up when the emulator starts.
+@interface YmirHost (Achievements)
+
+/// Whether the achievements service of the emulator is up.
+@property(class, nonatomic, readonly) BOOL achievementsAvailable;
+@property(class, nonatomic) BOOL achievementsEnabled;
+/// Hardcore mode: no loading of save states, no rewinding (turning it on with a game running restarts the game).
+@property(class, nonatomic) BOOL achievementsHardcore;
+
+/// What there is to show about the user, the loaded game and the progress (see AchievementsStatus in host_interface.hpp).
++ (NSDictionary<NSString *, id> *)achievementsStatus NS_SWIFT_NAME(achievementsStatus());
+/// The achievements of the loaded game, as dictionaries (see AchievementEntry in host_interface.hpp).
++ (NSArray<NSDictionary<NSString *, id> *> *)achievementsList NS_SWIFT_NAME(achievementsList());
+
++ (void)achievementsLoginWithUser:(NSString *)user
+                         password:(NSString *)password
+                       completion:(void (^)(BOOL success, NSString *message))completion
+    NS_SWIFT_NAME(achievementsLogin(user:password:completion:));
++ (void)achievementsLogout NS_SWIFT_NAME(achievementsLogout());
+
+/// Receives what happens (an achievement unlocked, the game identified, problems...), on the main thread. A dictionary
+/// with "kind", "title", "description", "badgeUrl", "message", "points" and "id".
++ (void)setAchievementsEventHandler:(nullable void (^)(NSDictionary<NSString *, id> *))handler
+    NS_SWIFT_NAME(setAchievementsEventHandler(_:));
+
+@end
+
 NS_ASSUME_NONNULL_END

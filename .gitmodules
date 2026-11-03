@@ -32,3 +32,6 @@
 [submodule "vendor/wil"]
 	path = vendor/wil
 	url = https://github.com/microsoft/wil.git
+[submodule "vendor/rcheevos/rcheevos"]
+	path = vendor/rcheevos/rcheevos
+	url = https://github.com/RetroAchievements/rcheevos.git

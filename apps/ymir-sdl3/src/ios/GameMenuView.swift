@@ -246,7 +246,7 @@ struct SaveStatesView: View {
                             YmirShell.closeMenu()
                         }
                         .ymirSecondaryButton()
-                        .disabled(!slot.present)
+                        .disabled(!slot.present || AchievementsModel.hardcoreLocksStates)
                         Menu {
                             Button {
                                 export(slot)

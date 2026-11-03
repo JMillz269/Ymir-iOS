@@ -6,6 +6,8 @@
 // invoked from the main thread, the same one that runs the SDL event loop, so they can safely enqueue events and touch
 // frontend state. Only standard library types are used so that this header can be included from Objective-C++.
 
+#include <cstdint>
+#include <ctime>
 #include <filesystem>
 #include <functional>
 #include <string>
@@ -59,6 +61,109 @@ struct HostInterface {
     std::function<int(const std::string &, int)> getInt;       // key, default (also used for enumerations)
     std::function<void(const std::string &, int)> setInt;      // key, value
 };
+
+// -- RetroAchievements --
+
+/// One achievement of the game that is loaded.
+struct AchievementEntry {
+    uint32_t id = 0;
+    std::string title;
+    std::string description;
+    std::string badgeUrl;       // picture when unlocked
+    std::string badgeLockedUrl; // picture while locked
+    uint32_t points = 0;
+    bool unlocked = false;
+    bool unlockedHardcore = false;
+    bool unsupported = false;   // can't be earned with this version of the runtime
+    bool unofficial = false;
+    std::string progress; // e.g. "12/50" for achievements that measure something; empty otherwise
+    float progressPercent = 0.0f;
+    std::time_t unlockTime = 0;
+};
+
+/// What the user interface shows about the state of RetroAchievements.
+struct AchievementsStatus {
+    bool enabled = false;      // the setting
+    bool hardcore = false;     // the setting
+    bool loggingIn = false;
+    bool loggedIn = false;
+    bool gameLoading = false;
+    bool gameLoaded = false;   // a game that RetroAchievements knows
+    bool gameUnknown = false;  // a game is loaded but RetroAchievements doesn't know it
+    bool hardcoreActive = false; // hardcore is on for the loaded game: save states can't be loaded, no rewind
+    std::string username;
+    std::string displayName;
+    std::string avatarUrl;
+    uint32_t score = 0;
+    uint32_t softcoreScore = 0;
+    std::string gameTitle;
+    std::string gameBadgeUrl;
+    uint32_t numAchievements = 0;
+    uint32_t numUnlocked = 0;
+    uint32_t points = 0;
+    uint32_t pointsUnlocked = 0;
+    std::string richPresence;
+    std::string message; // last problem to tell the user about (login failed and so on); empty if none
+};
+
+/// Something the user interface should show.
+struct AchievementEvent {
+    enum class Kind {
+        Unlocked,        // an achievement was earned
+        GameLoaded,      // the loaded game is known: title, number of achievements
+        GameCompleted,   // every achievement of the game was earned
+        LoginSucceeded,
+        LoginFailed,     // message
+        Error,           // message
+        Disconnected,    // unlocks couldn't be sent and are kept for later
+        Reconnected,
+        ChallengeShow,   // an indicator for a challenge achievement
+        ChallengeHide,
+        ProgressShow,    // progress of a measured achievement: title, progress
+        LeaderboardStarted,
+        LeaderboardFailed,
+        LeaderboardSubmitted,
+    };
+    Kind kind = Kind::Error;
+    std::string title;
+    std::string description;
+    std::string badgeUrl;
+    std::string message;
+    uint32_t points = 0;
+    uint32_t id = 0;
+};
+
+/// Connects the achievements service of the emulator and the native user interface. The first group is filled in by the
+/// emulator, the second by the user interface (before the emulator starts).
+struct AchievementsBridge {
+    // -- Filled in by the emulator --
+    std::function<AchievementsStatus()> status;
+    std::function<std::vector<AchievementEntry>()> achievements;
+    // Logs in with a user name and password; reports whether it worked, and the message if not
+    std::function<void(const std::string &, const std::string &, std::function<void(bool, const std::string &)>)> login;
+    std::function<void()> logout;
+    // Tells the service that the settings changed (enabled, hardcore)
+    std::function<void()> settingsChanged;
+
+    // -- Filled in by the user interface --
+    // Sends a request to the server. The response function takes the HTTP status (or -1 on a failure to connect) and the body;
+    // it may be called from any thread.
+    std::function<void(const std::string &url, const std::string &postData, const std::string &contentType,
+                       std::function<void(int, std::string)> done)>
+        http;
+    std::function<void(const AchievementEvent &)> event; // may be called from any thread
+    std::function<bool()> enabled;
+    std::function<bool()> hardcore;
+    // Stored sign-in (the user name and the token the server gave, not the password)
+    std::function<bool(std::string &user, std::string &token)> loadCredentials;
+    std::function<void(const std::string &user, const std::string &token)> saveCredentials;
+    std::function<void()> clearCredentials;
+};
+
+inline AchievementsBridge &GetAchievementsBridge() {
+    static AchievementsBridge bridge{};
+    return bridge;
+}
 
 /// @brief Gets the global host interface. Callbacks are empty while the emulator isn't running.
 inline HostInterface &GetHost() {

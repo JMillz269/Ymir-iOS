@@ -96,6 +96,8 @@ final class YmirShell: NSObject {
 
     /// Shows the game library and settings.
     @objc static func showLauncher() {
+        // (RetroAchievements: starts listening to what the emulator reports)
+        Task { @MainActor in AchievementsModel.shared.start() }
         guard launcherController == nil else { return }
 
         // Never stack the library on top of the in-game menu

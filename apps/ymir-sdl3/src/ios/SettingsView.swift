@@ -319,6 +319,10 @@ struct SettingsView: View {
         YmirHost.boolValue(key: "system.autodetectRegion", default: true) ? "Auto" : "Manual"
     }
 
+    private var achievementsValue: String {
+        YmirHost.achievementsEnabled ? (YmirHost.achievementsHardcore ? "Hardcore" : "On") : "Off"
+    }
+
     private var advancedValue: String {
         YmirHost.jitAvailable && YmirHost.boolValue(key: "system.useRecompiler", default: false) ? "JIT" : "Interpreter"
     }
@@ -390,6 +394,15 @@ struct SettingsView: View {
                     SettingsRowDivider()
                     SettingsNavRow(icon: "rectangle.on.rectangle", tint: .pink, title: "Interface") {
                         InterfaceSettingsView()
+                    }
+                }
+
+                SettingsGroup(
+                    title: "Online",
+                    footer: "RetroAchievements gives goals to the games you play and keeps score on retroachievements.org."
+                ) {
+                    SettingsNavRow(icon: "trophy.fill", tint: .yellow, title: "Achievements", value: achievementsValue) {
+                        AchievementsSettingsView()
                     }
                 }
 

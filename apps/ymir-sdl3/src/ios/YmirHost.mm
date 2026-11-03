@@ -17,6 +17,9 @@
 
 static __weak UIWindow *s_gameWindow = nil;
 
+// (YmirAchievements.mm)
+void YmirInstallAchievementsBridge(void);
+
 static NSString *ToNSString(const std::string &str) {
     NSString *result = [NSString stringWithUTF8String:str.c_str()];
     return result != nil ? result : @"";
@@ -31,6 +34,9 @@ static NSString *ToNSString(const std::filesystem::path &path) {
 /// Reacts to what the system does to the app: leaving the game when it's covered or sent to the background, and the
 /// sound going away from headphones.
 + (void)load {
+    // RetroAchievements' network, settings and stored sign-in, before the emulator asks for them
+    YmirInstallAchievementsBridge();
+
     // What the TXM detection of the JIT needs from the platform: the chip (from the name of the GPU) and the manual
     // override. Set before anything probes the JIT.
     @autoreleasepool {

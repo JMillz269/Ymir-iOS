@@ -91,6 +91,13 @@ if (NOT Ymir_LIBRARY_ONLY)
     add_subdirectory(discord-rpc EXCLUDE_FROM_ALL)
 endif ()
 
+if (IOS)
+    # rcheevos - https://github.com/RetroAchievements/rcheevos
+    # - RetroAchievements support in the iOS app
+    message(STATUS "==> rcheevos")
+    add_subdirectory(rcheevos)
+endif ()
+
 # Place vendored library projects under a Vendored folder in Visual Studio solutions
 if (MSVC)
     set_target_properties(chdr-lzma PROPERTIES FOLDER Vendored)
