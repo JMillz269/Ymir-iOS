@@ -13,6 +13,8 @@
 #include <ymir/sys/saturn.hpp>
 #include <ymir/util/dev_log.hpp>
 
+#include <filesystem>
+
 #include <SDL3/SDL.h>
 
 #include <fmt/format.h>
@@ -113,7 +115,11 @@ util::ROMLoadResult ROMService::LoadIPLROM() {
 
 ROMService::IPLROM ROMService::GetIPLROM() {
     // Load from settings if override is enabled
-    if (m_settings.system.ipl.overrideImage && !m_settings.system.ipl.path.empty()) {
+    // (an override that points to a file that isn't there, for example one named in a configuration file that came from
+    // another computer, is ignored: the ROMs found in the folder are used instead)
+    std::error_code overrideError{};
+    if (m_settings.system.ipl.overrideImage && !m_settings.system.ipl.path.empty() &&
+        std::filesystem::is_regular_file(m_settings.system.ipl.path, overrideError)) {
         devlog::info<grp::base>("Using IPL ROM overridden by settings");
         const auto &roms = m_context.romManager.GetIPLROMs();
         const ymir::db::IPLROMInfo *info = nullptr;
