@@ -72,6 +72,9 @@ NS_ASSUME_NONNULL_BEGIN
 /// Uses this BIOS image (nil: let the emulator pick), reloads it and restarts the system.
 /// Returns an error message, or nil on success.
 + (nullable NSString *)selectBIOSAtPath:(nullable NSString *)path NS_SWIFT_NAME(selectBIOS(path:));
+/// Deletes a BIOS image from the BIOS folder. If it was the one in use, another one is loaded (and the system restarts)
+/// when there is one. Returns an error message, or nil on success.
++ (nullable NSString *)deleteBIOSAtPath:(NSString *)path NS_SWIFT_NAME(deleteBIOS(path:));
 
 /// Returns an array of dictionaries with keys "index" (NSNumber), "present" (NSNumber) and "text" (NSString).
 + (NSArray<NSDictionary<NSString *, id> *> *)saveSlots NS_SWIFT_NAME(saveSlots());

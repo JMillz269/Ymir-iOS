@@ -61,6 +61,9 @@ struct HostInterface {
     // Uses this image (an empty path: let the emulator pick by region), reloads it and restarts the system.
     // Returns an error message or "" on success.
     std::function<std::string(const std::string &)> selectIPLROM;
+    // Deletes an image from the BIOS folder. If it was the one in use, another one is loaded and the system restarts.
+    // Returns an error message or "" on success.
+    std::function<std::string(const std::string &)> deleteIPLROM;
 
     // -- Settings --
     std::function<bool(const std::string &, bool)> getBool;    // key, default
