@@ -1745,6 +1745,36 @@ void App::RunEmulator() {
         m_context.EnqueueEvent(events::emu::HardReset());
         return {};
     };
+    iosHost.deleteIPLROM = [this](const std::string &path) -> std::string {
+        std::error_code error{};
+        const std::filesystem::path target{path};
+        const bool wasLoaded = !m_context.iplRomPath.empty() &&
+                               std::filesystem::equivalent(target, m_context.iplRomPath, error);
+        error.clear();
+        const bool wasOverride = !m_settings.system.ipl.path.empty() &&
+                                 std::filesystem::equivalent(target, m_settings.system.ipl.path, error);
+        error.clear();
+        if (!std::filesystem::remove(target, error) || error) {
+            return "The file couldn't be deleted";
+        }
+        if (wasOverride) {
+            m_settings.system.ipl.overrideImage = false;
+            m_settings.system.ipl.path.clear();
+            m_settings.MakeDirty();
+        }
+        m_romService.ScanIPLROMs();
+        if (wasLoaded) {
+            // Another image takes its place, if there is one
+            const util::ROMLoadResult result = m_romService.LoadIPLROM();
+            if (result.succeeded) {
+                m_context.EnqueueEvent(events::emu::HardReset());
+            } else {
+                m_context.iplRomPath.clear();
+                m_context.iplRomInfo = nullptr;
+            }
+        }
+        return {};
+    };
     touchControls.SetStoragePath(m_context.profile.GetPath(ProfilePath::PersistentState) / "touch_layout.cfg");
     app::ios::InstallSettingsAccessors(iosHost, m_context, settings, {.touchControls = &touchControls});
     iosHost.quitGame = [this] {

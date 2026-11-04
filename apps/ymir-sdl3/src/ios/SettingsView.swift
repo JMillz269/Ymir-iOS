@@ -285,6 +285,7 @@ struct SettingsView: View {
     @State private var biosAutomatic = true
     @State private var pendingBIOSPath: String?
     @State private var confirmBIOSChange = false
+    @State private var pendingDeleteBIOS: [String: Any]?
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
@@ -450,6 +451,25 @@ struct SettingsView: View {
             biosName = YmirHost.biosName
             refreshBIOSOptions()
         }
+        .confirmationDialog(
+            "Delete this BIOS?",
+            isPresented: Binding(get: { pendingDeleteBIOS != nil }, set: { if !$0 { pendingDeleteBIOS = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                if let path = pendingDeleteBIOS?["path"] as? String {
+                    deleteBIOS(path)
+                }
+                pendingDeleteBIOS = nil
+            }
+            Button("Cancel", role: .cancel) { pendingDeleteBIOS = nil }
+        } message: {
+            let name = pendingDeleteBIOS?["name"] as? String ?? ""
+            let inUse = pendingDeleteBIOS?["selected"] as? Bool ?? false
+            Text(inUse
+                 ? "\(name) is the BIOS in use. It is removed from this device, and the emulator restarts with another BIOS if there is one."
+                 : "\(name) is removed from this device.")
+        }
         .confirmationDialog("Switch BIOS?", isPresented: $confirmBIOSChange, titleVisibility: .visible) {
             Button("Switch and Restart") {
                 applyBIOS(pendingBIOSPath)
@@ -478,75 +498,91 @@ struct SettingsView: View {
 
     /// The BIOS is the one thing the app can't run without, so its state sits on top as a status card.
     private func biosCard(width: CGFloat) -> some View {
-        HStack(spacing: 12) {
-            SettingsIcon(systemName: "cpu", tint: hasBIOS ? .green : .orange, size: 40)
-            biosTitle
-            Spacer(minLength: 8)
-            Button(hasBIOS ? "Replace" : "Import") {
-                showImporter = true
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center, spacing: 12) {
+                SettingsIcon(systemName: "cpu", tint: hasBIOS ? .green : .orange, size: 40)
+                // (the name can be long: it takes the room that is left, on up to two lines, and never pushes the button out)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(hasBIOS ? "Saturn BIOS ready" : "BIOS required")
+                        .font(.headline)
+                        .lineLimit(1)
+                    Text(hasBIOS ? biosName : "Import a Sega Saturn BIOS (IPL ROM) to run games.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                        .multilineTextAlignment(.leading)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .layoutPriority(1)
+                Button(hasBIOS ? "Replace" : "Import") {
+                    showImporter = true
+                }
+                .ymirSecondaryButton()
+                .controlSize(.small)
+                .fixedSize()
             }
-            .ymirSecondaryButton()
-            .controlSize(.small)
-            .fixedSize()
+            if biosOptions.count > 1 {
+                biosChooser
+            }
         }
         .padding(14)
         .frame(width: width)
         .ymirGlassCard()
     }
 
-    /// The name of the BIOS in use. With more than one image in the BIOS folder, it's a menu to choose the image.
-    @ViewBuilder
-    private var biosTitle: some View {
-        let content = VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 4) {
-                Text(hasBIOS ? "Saturn BIOS ready" : "BIOS required")
-                    .font(.headline)
-                    .foregroundStyle(.primary)
-                if biosOptions.count > 1 {
-                    Image(systemName: "chevron.up.chevron.down")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                }
+    /// With more than one image in the BIOS folder: a menu to choose the image, and to delete one.
+    private var biosChooser: some View {
+        Menu {
+            Button {
+                chooseBIOS(nil)
+            } label: {
+                Label("Automatic (by region)", systemImage: biosAutomatic ? "checkmark" : "wand.and.stars")
             }
-            Text(hasBIOS ? biosName : "Import a Sega Saturn BIOS (IPL ROM) to run games.")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-                .truncationMode(.middle)
-                .multilineTextAlignment(.leading)
-                .fixedSize(horizontal: false, vertical: true)
-            if biosOptions.count > 1 {
-                Text(biosAutomatic ? "Chosen automatically · tap to choose" : "Tap to choose another")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        if biosOptions.count > 1 {
-            Menu {
+            Divider()
+            ForEach(biosOptions.indices, id: \.self) { index in
+                let option = biosOptions[index]
+                let name = option["name"] as? String ?? ""
+                let detail = option["detail"] as? String ?? ""
+                let selected = (option["selected"] as? Bool ?? false) && !biosAutomatic
                 Button {
-                    chooseBIOS(nil)
+                    chooseBIOS(option["path"] as? String)
                 } label: {
-                    Label("Automatic (by region)", systemImage: biosAutomatic ? "checkmark" : "wand.and.stars")
+                    Label("\(name) — \(detail)", systemImage: selected ? "checkmark" : "cpu")
                 }
-                Divider()
+            }
+            Divider()
+            Menu {
                 ForEach(biosOptions.indices, id: \.self) { index in
                     let option = biosOptions[index]
-                    let name = option["name"] as? String ?? ""
-                    let detail = option["detail"] as? String ?? ""
-                    let selected = (option["selected"] as? Bool ?? false) && !biosAutomatic
-                    Button {
-                        chooseBIOS(option["path"] as? String)
+                    Button(role: .destructive) {
+                        pendingDeleteBIOS = option
                     } label: {
-                        Label("\(name) — \(detail)", systemImage: selected ? "checkmark" : "cpu")
+                        Label(option["name"] as? String ?? "", systemImage: "trash")
                     }
                 }
             } label: {
-                content
+                Label("Delete a BIOS", systemImage: "trash")
             }
-            .buttonStyle(.plain)
-        } else {
-            content
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.left.arrow.right")
+                    .font(.footnote.weight(.semibold))
+                Text(biosAutomatic ? "BIOS: Automatic (by region)" : "Choose another BIOS")
+                    .font(.subheadline)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .foregroundStyle(.primary)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .frame(maxWidth: .infinity)
+            .background(.thinMaterial, in: Capsule())
         }
+        .buttonStyle(.plain)
     }
 
     private func refreshBIOSOptions() {
@@ -562,6 +598,15 @@ struct SettingsView: View {
         } else {
             applyBIOS(path)
         }
+    }
+
+    private func deleteBIOS(_ path: String) {
+        if let error = YmirHost.deleteBIOS(path: path) {
+            biosAlert = error
+        }
+        hasBIOS = YmirHost.hasBIOS
+        biosName = YmirHost.biosName
+        refreshBIOSOptions()
     }
 
     private func applyBIOS(_ path: String?) {

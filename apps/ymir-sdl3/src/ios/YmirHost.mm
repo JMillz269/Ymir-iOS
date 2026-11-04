@@ -382,6 +382,15 @@ static NSString *ToNSString(const std::filesystem::path &path) {
     return error.empty() ? nil : ToNSString(error);
 }
 
++ (NSString *)deleteBIOSAtPath:(NSString *)path {
+    auto &host = app::ios::GetHost();
+    if (!host.deleteIPLROM) {
+        return @"The emulator is not running";
+    }
+    std::string error = host.deleteIPLROM(std::string{path.UTF8String});
+    return error.empty() ? nil : ToNSString(error);
+}
+
 + (NSArray<NSDictionary<NSString *, id> *> *)saveSlots {
     NSMutableArray *result = [NSMutableArray array];
     auto &host = app::ios::GetHost();
