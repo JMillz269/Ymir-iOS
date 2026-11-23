@@ -28,30 +28,9 @@
     "nlohmann-json",
     "openssl",
     "rtmidi",
-    "sdl3",
     {
       "name": "sdl3",
-      "features": [
-        "vulkan"
-      ],
-      "platform": "!ios"
-    },
-    {
-      "name": "sdl3",
-      "features": [
-        "dbus",
-        "ibus",
-        "wayland"
-      ],
-      "platform": "linux"
-    },
-    {
-      "name": "sdl3",
-      "features": [
-        "alsa",
-        "x11"
-      ],
-      "platform": "!windows & !ios"
+      "platform": "ios"
     },
     "tomlplusplus",
     "zlib",

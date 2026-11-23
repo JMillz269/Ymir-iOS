@@ -8,6 +8,12 @@ if (IOS)
     enable_language(Swift)
 endif ()
 
+# Workaround for a CMake issue involving Objective-C code: https://gitlab.kitware.com/cmake/cmake/-/work_items/24104
+# (not for iOS, where the Objective-C++ files of the app are compiled as before)
+if (APPLE AND NOT IOS)
+    enable_language(OBJC OBJCXX)
+endif ()
+
 # Check for Vulkan support before including CompileShaders as it depends on knowing if Vulkan
 # is available to determine whether to make SPIR-V compilation required or optional.
 # Vulkan support is excluded from macOS as the system doesn't support it natively.

@@ -593,7 +593,10 @@ find_package(date CONFIG REQUIRED)
 find_package(OpenSSL CONFIG REQUIRED)
 find_package(CURL REQUIRED)
 find_package(rtmidi CONFIG REQUIRED)
-find_package(SDL3 CONFIG REQUIRED)
+if (IOS)
+    # (the other platforms get SDL3 from the submodule in vendor/SDL3)
+    find_package(SDL3 CONFIG REQUIRED)
+endif ()
 find_package(tomlplusplus CONFIG REQUIRED)
 
 target_include_directories(ymir-sdl3

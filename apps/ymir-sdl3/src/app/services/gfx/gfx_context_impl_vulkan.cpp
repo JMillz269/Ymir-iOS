@@ -26,6 +26,13 @@ using namespace ymir::gpu::vulkan;
 
 namespace app::gfx {
 
+#ifdef __linux__
+static bool IsWayland() {
+    const char *driver = SDL_GetCurrentVideoDriver(); // null if video isn't initialized
+    return driver != nullptr && std::strcmp(driver, "wayland") == 0;
+}
+#endif
+
 static vk::Format ToVulkanFormat(PixelFormat format) {
     switch (format) {
     case PixelFormat::Unknown: return vk::Format::eUndefined;
@@ -368,9 +375,18 @@ struct VulkanGraphicsContext::Impl {
             return createResult.Error();
         }
 
+        // Surface extents
+        int ww, wh;
+        SDL_GetWindowSizeInPixels(spec.window, &ww, &wh);
+        const vk::Extent2D swapchainExtents{
+            .width = static_cast<uint32>(ww),
+            .height = static_cast<uint32>(wh),
+        };
+
         // Swapchain
-        if (auto createResult = VulkanSwapchain::Create(device.get(), physicalDevice, 0, presentQueue, surface,
-                                                        kFrameCount, presentMode == PresentMode::VSync);
+        if (auto createResult =
+                VulkanSwapchain::Create(device.get(), physicalDevice, 0, presentQueue, surface, kFrameCount,
+                                        swapchainExtents, presentMode == PresentMode::VSync);
             createResult.HasValue()) {
             swapchain = std::move(createResult.Value());
         } else {
@@ -467,7 +483,7 @@ struct VulkanGraphicsContext::Impl {
                 .borderColor = vk::BorderColor::eFloatTransparentBlack,
                 .unnormalizedCoordinates = false,
             };
-            if (auto createResult = device->createSamplerUnique(nearestSamplerInfo);
+            if (auto createResult = device->createSamplerUnique(linearSamplerInfo);
                 createResult.result == vk::Result::eSuccess) {
                 samplerLinear = std::move(createResult.value);
             } else {
@@ -651,6 +667,17 @@ struct VulkanGraphicsContext::Impl {
 
             currFrame.waitTick = mainSemaphoreTick++;
         }
+
+#ifdef __linux__
+        // HACK: horrible workaround for window contents no longer updating under Wayland when switching from any other
+        // backend to Vulkan. Introduces a single black frame flash.
+        const bool isSoftware = physicalDevice.getProperties().deviceType == vk::PhysicalDeviceType::eCpu;
+        if (IsWayland() && isSoftware) {
+            ResizeFramebuffer(ww + 1, wh);
+            Present();
+            ResizeFramebuffer(ww, wh);
+        }
+#endif
 
         return {};
     }
