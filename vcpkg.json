@@ -28,10 +28,6 @@
     "nlohmann-json",
     "openssl",
     "rtmidi",
-    {
-      "name": "sdl3",
-      "platform": "ios"
-    },
     "tomlplusplus",
     "zlib",
     "zstd",

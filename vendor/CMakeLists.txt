@@ -77,11 +77,8 @@ if (NOT Ymir_LIBRARY_ONLY)
     # SDL3 - https://github.com/libsdl-org/SDL
     # - Unable to configure libdecor support for Wayland
     # - Must be added BEFORE dear ImGui
-    # - The iOS build still uses SDL3 from vcpkg (find_package), as before
-    if (NOT IOS)
-        message(STATUS "==> SDL3")
-        add_subdirectory(SDL3 EXCLUDE_FROM_ALL)
-    endif ()
+    message(STATUS "==> SDL3")
+    add_subdirectory(SDL3 EXCLUDE_FROM_ALL)
 
     # dear ImGui - https://github.com/ocornut/imgui
     # - Using the docking branch

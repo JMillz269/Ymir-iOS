@@ -78,11 +78,6 @@ target_include_directories(imgui
 target_compile_features(imgui PUBLIC cxx_std_20)
 target_compile_definitions(imgui PUBLIC IMGUI_USER_CONFIG="ymir_imconfig.h")
 
-if (IOS)
-	# (the other platforms get SDL3 from the submodule in vendor/SDL3)
-	find_package(SDL3 CONFIG REQUIRED)
-endif ()
-
 target_link_libraries(imgui PRIVATE SDL3::SDL3)
 if (Vulkan_FOUND)
 	target_link_libraries(imgui PRIVATE Vulkan::Vulkan)

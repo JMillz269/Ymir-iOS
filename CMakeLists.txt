@@ -9,8 +9,7 @@ if (IOS)
 endif ()
 
 # Workaround for a CMake issue involving Objective-C code: https://gitlab.kitware.com/cmake/cmake/-/work_items/24104
-# (not for iOS, where the Objective-C++ files of the app are compiled as before)
-if (APPLE AND NOT IOS)
+if (APPLE)
     enable_language(OBJC OBJCXX)
 endif ()
 
